@@ -1,0 +1,14 @@
+# Tüm metin dosyaları depoda ve çalışma dizininde LF (\n) ile tutulur.
+# Windows'ta CRLF ile checkout edilen shell script'leri ve Dockerfile'lar
+# Linux container'da "exec /bin/sh^M: no such file or directory" hatası verir.
+* text=auto eol=lf
+
+# Satır sonu dönüşümü uygulanmaması gereken ikili dosyalar
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.woff binary
+*.woff2 binary

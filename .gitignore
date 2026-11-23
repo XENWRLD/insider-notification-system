@@ -1,0 +1,38 @@
+# --- Derlenmiş çıktılar ---
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# --- Test ve coverage ---
+*.test
+*.out
+coverage.*
+coverage/
+
+# --- Ortam değişkenleri (sır içerir, repoya girmemeli) ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Go araç çıktıları ---
+vendor/
+go.work
+go.work.sum
+
+# --- IDE / editör ---
+.idea/
+.vscode/
+*.swp
+
+# --- İşletim sistemi ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Şirkete ait assessment belgesi: public repoya girmesin ---
+docs/assessment/
