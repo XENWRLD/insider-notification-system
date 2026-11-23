@@ -25,6 +25,7 @@ const (
 	CodeInvalidJSON          ErrorCode = "invalid_json"           // 400
 	CodeUnsupportedMediaType ErrorCode = "unsupported_media_type" // 415
 	CodePayloadTooLarge      ErrorCode = "payload_too_large"      // 413
+	CodeInvalidCursor        ErrorCode = "invalid_cursor"         // 400
 	CodeNotFound             ErrorCode = "not_found"              // 404
 	CodeMethodNotAllowed     ErrorCode = "method_not_allowed"     // 405
 	CodeConflict             ErrorCode = "conflict"               // 409 (Adım 4-5)

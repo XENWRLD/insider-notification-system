@@ -50,6 +50,16 @@ type NotificationStore interface {
 		ctx context.Context, notifications []*domain.Notification,
 		idem store.IdempotencyRequest, renderResponse func() any,
 	) (store.Outcome, error)
+
+	GetNotification(ctx context.Context, id uuid.UUID) (store.NotificationWithAttempts, error)
+
+	ListNotifications(
+		ctx context.Context, filter domain.ListFilter,
+	) ([]store.NotificationWithAttempts, bool, error)
+
+	GetBatchSummary(ctx context.Context, batchID uuid.UUID) (domain.BatchSummary, error)
+
+	CancelNotification(ctx context.Context, id uuid.UUID) (*domain.Notification, error)
 }
 
 // notificationHandler, bildirim uçlarını sunar.
@@ -113,11 +123,53 @@ type notificationResponse struct {
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Attempts HER ZAMAN dizi olarak serialize edilir — omitempty YOK.
+	// Boş dizi "henüz denenmedi" demek; alanın hiç olmaması veya null olması
+	// istemciyi "bilgi yok mu, deneme yok mu?" ikilemine düşürürdü.
+	Attempts []attemptResponse `json:"attempts"`
+}
+
+// attemptResponse, tek bir gönderim denemesinin dışa verilen biçimi.
+type attemptResponse struct {
+	AttemptNo int `json:"attempt_no"`
+	// StatusCode, timeout/bağlantı hatasında null olur: hiç HTTP yanıtı gelmedi.
+	StatusCode *int      `json:"status_code"`
+	Error      *string   `json:"error"`
+	DurationMS int       `json:"duration_ms"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// newAttemptResponses, deneme listesini API biçimine çevirir.
+//
+// make(..., 0, n) kritik: nil dilim JSON'da null serialize eder, bizim sözleşmemiz [].
+func newAttemptResponses(attempts []domain.Attempt) []attemptResponse {
+	result := make([]attemptResponse, 0, len(attempts))
+
+	for _, attempt := range attempts {
+		result = append(result, attemptResponse{
+			AttemptNo:  attempt.AttemptNo,
+			StatusCode: attempt.StatusCode,
+			Error:      attempt.Error,
+			DurationMS: attempt.DurationMS,
+			CreatedAt:  attempt.CreatedAt,
+		})
+	}
+
+	return result
 }
 
 // newNotificationResponse, domain modelini API biçimine çevirir.
+// Deneme geçmişi olmayan bağlamlarda (oluşturma) attempts boş dizi olur.
 func newNotificationResponse(n *domain.Notification) notificationResponse {
-	return notificationResponse{
+	return newNotificationResponseWithAttempts(n, nil)
+}
+
+// newNotificationResponseWithAttempts, bildirimi deneme geçmişiyle API biçimine çevirir.
+func newNotificationResponseWithAttempts(
+	n *domain.Notification, attempts []domain.Attempt,
+) notificationResponse {
+	response := notificationResponse{
 		ID:                n.ID,
 		BatchID:           n.BatchID,
 		Channel:           n.Channel,
@@ -133,7 +185,10 @@ func newNotificationResponse(n *domain.Notification) notificationResponse {
 		CorrelationID:     n.CorrelationID,
 		CreatedAt:         n.CreatedAt,
 		UpdatedAt:         n.UpdatedAt,
+		Attempts:          newAttemptResponses(attempts),
 	}
+
+	return response
 }
 
 // idempotencyFor, istekten koruma parametrelerini çıkarır.

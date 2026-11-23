@@ -102,8 +102,9 @@ func TestCreateBatchResponseIsSummaryOnly(t *testing.T) {
 		keysOf(raw),
 		"batch yanıtı yalnızca özet alanlarını içermeli")
 
-	// Location header'ı verilmiyor: /api/v1/batches/{id} ucu henüz yok (Adım 5).
-	require.Empty(t, recorder.Header().Get("Location"))
+	// Location batch özeti ucunu gösterir (uç Adım 5'te eklendi).
+	require.Equal(t, "/api/v1/batches/"+raw["batch_id"].(string),
+		recorder.Header().Get("Location"))
 }
 
 // keysOf, haritanın anahtarlarını döner.

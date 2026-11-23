@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
@@ -40,6 +41,77 @@ type stubNotificationStore struct {
 	idem store.IdempotencyRequest
 	// rendered, renderResponse'un ürettiği cevap — store'un ne sakladığını görmek için.
 	rendered any
+
+	// --- okuma uçları için ---
+
+	// found, GetNotification / CancelNotification'ın döneceği kayıt.
+	found *store.NotificationWithAttempts
+	// listed, ListNotifications'ın döneceği sayfa.
+	listed []store.NotificationWithAttempts
+	// hasMore, ListNotifications'ın sonraki sayfa bilgisi.
+	hasMore bool
+	// summary, GetBatchSummary'nin döneceği özet.
+	summary *domain.BatchSummary
+	// filter, ListNotifications'a geçirilen doğrulanmış filtre.
+	filter domain.ListFilter
+	// cancelled, CancelNotification'a geçirilen kimlik.
+	cancelled uuid.UUID
+}
+
+func (s *stubNotificationStore) GetNotification(
+	_ context.Context, _ uuid.UUID,
+) (store.NotificationWithAttempts, error) {
+	if s.err != nil {
+		return store.NotificationWithAttempts{}, s.err
+	}
+	if s.found == nil {
+		return store.NotificationWithAttempts{}, store.ErrNotFound
+	}
+
+	return *s.found, nil
+}
+
+func (s *stubNotificationStore) ListNotifications(
+	_ context.Context, filter domain.ListFilter,
+) ([]store.NotificationWithAttempts, bool, error) {
+	s.filter = filter
+
+	if s.err != nil {
+		return nil, false, s.err
+	}
+
+	return s.listed, s.hasMore, nil
+}
+
+func (s *stubNotificationStore) GetBatchSummary(
+	_ context.Context, _ uuid.UUID,
+) (domain.BatchSummary, error) {
+	if s.err != nil {
+		return domain.BatchSummary{}, s.err
+	}
+	if s.summary == nil {
+		return domain.BatchSummary{}, store.ErrNotFound
+	}
+
+	return *s.summary, nil
+}
+
+func (s *stubNotificationStore) CancelNotification(
+	_ context.Context, id uuid.UUID,
+) (*domain.Notification, error) {
+	s.cancelled = id
+
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.found == nil {
+		return nil, store.ErrNotFound
+	}
+
+	cancelled := *s.found.Notification
+	cancelled.Status = domain.StatusCancelled
+
+	return &cancelled, nil
 }
 
 func (s *stubNotificationStore) CreateNotification(

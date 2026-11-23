@@ -13,9 +13,11 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   `/health/live`, `/health/ready`, Dockerfile, compose = postgres 18 + redis 8 + api),
   Adım 2 (şema: 3 migration, 4 index, `migrate` servisi, testcontainers testleri),
   Adım 3 (domain + store + `POST /api/v1/notifications`, API sözleşmesi),
-  Adım 4 (batch + idempotency: CopyFrom, claim-first transaction, uç başına gövde sınırı)
-- **Sıradaki:** Adım 5 — okuma ve iptal: `GET /notifications/{id}` (deneme geçmişiyle),
-  `GET /batches/{id}` özeti, cursor pagination'lı listeleme, atomik iptal (`409` if başladı)
+  Adım 4 (batch + idempotency: CopyFrom, claim-first transaction, uç başına gövde sınırı),
+  Adım 5 (okuma uçları: `GET {id}`, cursor listeleme, batch özeti, atomik iptal)
+- **Sıradaki:** Adım 6 — worker motoru: kanal havuzları, `SKIP LOCKED` claim (20'li),
+  lease + token, reaper, provider client, mock provider, graceful shutdown.
+  Ayrıca `store.DeleteExpiredIdempotencyKeys` periyodik çağrısı reaper'ın yanına eklenecek
 - **Henüz boş** (`.gitkeep`): `internal/{worker,provider,ratelimit}`, `cmd/worker`,
   `cmd/mockprovider`, `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
@@ -34,6 +36,11 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 - `status = 'processing'` satırı lease'siz olamaz (CHECK); reaper bu değişmeze güvenir.
 - Claim index'i **kısmi**: yalnızca `pending`/`retrying` satırlarını tutar, `sent` kayıtları
   milyonlara çıksa da büyümez.
+- `000004` (Adım 5): `(status, created_at DESC, id DESC)`. Adım 2'de ertelenip Adım 5'te
+  **ölçülerek** eklendi — nadir durum filtresinde `Seq Scan` 13.77 ms → `Index Scan`
+  0.13 ms. Gerekçe ve kanal index'inin neden eklenmediği migration dosyasında yazılı.
+- **Index ölçümü uygulamanın ürettiği SQL ile yapılır**: `explainQuery` yardımcısı
+  `buildListQuery`'nin metnini ve argümanlarını aynen `EXPLAIN`'e verir.
 
 ### API sözleşmesi (Adım 3'te sabitlendi)
 
@@ -78,6 +85,31 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   `correlation_id`. `Location` header'ı **yok** (`/batches/{id}` ucu Adım 5'te geliyor).
 - **Gövde sınırı uç başına**: `BODY_LIMIT_SINGLE` (128 KiB) / `BODY_LIMIT_BATCH` (16 MiB).
   Batch'in 413 mesajı sınırı ve "batch'i bölün" öğüdünü içerir.
+- **Batch yanıtı `Location: /api/v1/batches/{id}`** döner (uç Adım 5'te geldi).
+
+### Okuma uçları (Adım 5'te sabitlendi)
+
+- **`attempts` HER ZAMAN dizi**: oluşturma yanıtında ve denemesi olmayan kayıtta `[]`.
+  `omitempty` yok, `null` yok. Go'da `nil` slice `null` serialize ettiği için
+  `newAttemptResponses` daima `make(..., 0, n)` kullanır.
+- **Listede de gerçek deneme verisi** döner. Boş bırakmak "denenmedi" demek olurdu.
+  Sayfadaki kimliklerin denemeleri `attemptsFor` ile **tek sorguda** çekilir (N+1 yok);
+  `ORDER BY notification_id, attempt_no` Adım 2'deki unique index'in sırasıyla aynı.
+- **Cursor opaktır**: `base64.RawURLEncoding(created_at RFC3339Nano + " " + id)`.
+  RFC3339Nano zorunlu — mikrosaniye kaybolursa aynı saniyedeki kayıtlarda sayfalama
+  atlama/tekrar üretir. Bozuk imleç → `400 invalid_cursor`.
+- **Sonraki sayfa `limit+1`** kayıt çekilerek tespit edilir; son sayfada
+  `next_cursor: null`.
+- **Filtre mantığı**: aynı parametrenin değerleri **VEYA**, farklı parametreler **VE**.
+  `from`/`to` saat dilimli RFC3339 olmalı (tarih-only reddedilir), aralık **yarı açık**
+  `[from, to)`. `limit` varsayılan 20, en fazla 100.
+- **Geçersiz UUID → `404`** (400 değil): çözümlenemeyen bir kimlik zaten var olamaz.
+- **İptal**: tek `UPDATE ... WHERE status IN ('pending','retrying')` ile atomik.
+  Güncelleme olmazsa 404/409 ayrımı için ikinci bir varlık sorgusu atılır (yalnızca
+  hata yolunda). Worker claim'i ile yarışta claim kazanırsa iptal `409` alır.
+- **Listeleme `WHERE`'i Go'da dinamik kurulur** (`buildListQuery`): `$n IS NULL OR`
+  kalıbı pgx statement cache + generic plan altında cursor koşulunu `Index Cond` yerine
+  `Filter`'a düşürüyor. Plan `TestListQueryUsesCursorIndex` ile testte doğrulanıyor.
 
 ## Modül ve klasörler
 

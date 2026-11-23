@@ -116,7 +116,7 @@ func (h notificationHandler) createBatch(w http.ResponseWriter, r *http.Request)
 		slog.Int("accepted_count", response.AcceptedCount),
 	)
 
-	// Location header'ı bilerek verilmiyor: /api/v1/batches/{id} ucu Adım 5'te geliyor,
-	// şimdi 404'e işaret etmesi yanıltıcı olurdu.
+	// Batch özeti ucu Adım 5'te geldi, artık Location gerçek bir kaynağı gösteriyor.
+	w.Header().Set("Location", "/api/v1/batches/"+batchID.String())
 	writeJSON(w, http.StatusAccepted, response)
 }

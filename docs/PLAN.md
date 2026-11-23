@@ -222,7 +222,18 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         devralınır (`ON CONFLICT ... DO UPDATE ... WHERE süresi dolmuş`)
   - [x] Batch yazımı `pgx.CopyFrom`; zaman kolonları DB varsayılanına bırakıldı
   - [x] Uç başına gövde sınırı (`BODY_LIMIT_SINGLE` / `BODY_LIMIT_BATCH`)
-- [ ] **Adım 5 — Okuma + iptal:** get, batch özeti, cursor listeleme, atomik iptal → `feat: add query, listing and cancellation endpoints`
+- [x] **Adım 5 — Okuma + iptal:** get, batch özeti, cursor listeleme, atomik iptal → `feat: add query, listing and cancellation endpoints`
+  - [x] Cursor opak `base64.RawURLEncoding` + RFC3339Nano; `limit+1` ile `next_cursor`
+  - [x] Tarih aralığı **yarı açık** `[from, to)`; tarih-only reddedilir (saat dilimi zorunlu)
+  - [x] İptal tek `UPDATE ... WHERE status IN (...)` ile atomik; worker claim'i ile yarış
+        testle kanıtlandı (claim kazanırsa iptal `409`, rollback olursa iptal başarılı)
+  - [x] `attempts` her zaman dizi ve **listede de gerçek veri** (tek sorguyla, N+1 yok)
+  - [x] Listeleme `WHERE`'i Go'da dinamik kuruluyor — `$n IS NULL OR` kalıbı generic
+        plan'da cursor koşulunu `Index Cond` yerine `Filter`'a düşürüyordu
+  - [x] **Adım 2'den ertelenen index kararı verildi:** `000004` migration'ı ile
+        `(status, created_at DESC, id DESC)`. Ölçüm (100k satır, 20'si `failed`):
+        `Seq Scan` 13.77 ms → `Index Scan` 0.13 ms. Kanal için ayrı index eklenmedi;
+        gerekçe migration dosyasında
 
 **Gün sonu kontrolü:** `docker compose up` çalışıyor; curl ile oluştur / listele / iptal et.
 
@@ -255,6 +266,10 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         güvenli bir tercihtir."
   - [ ] README'de batch sınırları: "1000 kayıt ve 16 MB sınırı birlikte uygulanır;
         Türkçe/emoji içerikli çok uzun e-posta batch'leri byte sınırına önce takılabilir."
+  - [ ] README'de cursor sözleşmesi: imleç **opaktır**, yalnızca önceki yanıttan gelen
+        `next_cursor` geri verilmelidir; elle kurulmamalı (iç yapı değişebilir)
+  - [ ] README'de tarih aralığı: `[from, to)` yarı açık; `to` hariç olduğu için ardışık
+        pencereler sınır kaydını iki kez saymaz. Saat dilimi zorunlu
 - [ ] **Son prova:** sıfırdan klon + demo senaryosu
 - [ ] **Mülakat provası**
 - [ ] *(Zaman kalırsa)* **Tracing:** OpenTelemetry + Jaeger

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -40,6 +41,55 @@ func (e *BatchValidationError) Error() string {
 	}
 
 	return "batch doğrulama hatası: " + strings.Join(parts, "; ")
+}
+
+// BatchSummary, bir batch'in durum bazında özeti.
+type BatchSummary struct {
+	BatchID uuid.UUID
+	Total   int
+
+	// Counts, altı durumun TAMAMINI içerir; hiç kaydı olmayan durum için 0.
+	// Sabit şema sayesinde istemci `counts.sent` diye okur, alan varlığını kontrol
+	// etmek zorunda kalmaz.
+	Counts map[Status]int
+
+	// Completed, tüm bildirimlerin terminal duruma ulaşıp ulaşmadığı.
+	Completed bool
+
+	CreatedAt time.Time
+}
+
+// allStatuses, Counts'un sabit şemasını üretmek için tüm durumlar.
+var allStatuses = []Status{
+	StatusPending, StatusProcessing, StatusSent,
+	StatusRetrying, StatusFailed, StatusCancelled,
+}
+
+// NewBatchSummary, durum sayımlarından özet üretir.
+//
+// Eksik durumlar sıfırla doldurulur ve Completed, durum listesini burada ikinci kez
+// yazmak yerine IsTerminal() üzerinden hesaplanır — durum makinesi tek kaynak kalır.
+func NewBatchSummary(batchID uuid.UUID, counts map[Status]int, createdAt time.Time) BatchSummary {
+	summary := BatchSummary{
+		BatchID:   batchID,
+		Counts:    make(map[Status]int, len(allStatuses)),
+		Completed: true,
+		CreatedAt: createdAt,
+	}
+
+	for _, status := range allStatuses {
+		count := counts[status]
+
+		summary.Counts[status] = count
+		summary.Total += count
+
+		// Terminal olmayan tek bir kayıt bile batch'i "tamamlanmadı" yapar.
+		if count > 0 && !status.IsTerminal() {
+			summary.Completed = false
+		}
+	}
+
+	return summary
 }
 
 // NewNotificationBatch, bir batch isteğini doğrular ve hazır bildirimleri üretir.

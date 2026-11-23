@@ -71,10 +71,17 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.Get("/health/live", health.live)
 	router.Get("/health/ready", health.ready)
 
-	// Sürümlü API tabanı: okuma ve iptal uçları (Adım 5) buraya eklenecek.
+	// Sürümlü API tabanı. /metrics (Adım 9) ve /ws (bonus) buraya eklenecek.
+	//
+	// Rota sırası: chi en belirgin kalıbı seçer, bu yüzden "/notifications" ile
+	// "/notifications/batch" çakışmaz.
 	router.Route("/api/v1", func(api chi.Router) {
 		api.Post("/notifications", notifications.create)
 		api.Post("/notifications/batch", notifications.createBatch)
+		api.Get("/notifications", notifications.list)
+		api.Get("/notifications/{id}", notifications.get)
+		api.Post("/notifications/{id}/cancel", notifications.cancel)
+		api.Get("/batches/{id}", notifications.batchSummary)
 	})
 
 	return router

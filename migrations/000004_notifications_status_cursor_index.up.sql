@@ -1,0 +1,28 @@
+-- Listeleme ucunun durum filtresi için bileşik index (Adım 5).
+--
+-- Adım 2'de bu index bilinçli olarak ERTELENDİ: "gerçek sorgu yazılmadan index
+-- eklenmez, karar EXPLAIN ANALYZE ile verilir". Ölçüm Adım 5'te yapıldı.
+--
+-- Ölçüm (100.000 satır, 20'si 'failed' — yani nadir bir durum, ki iyi çalışan bir
+-- sistemde hata sayısı zaten azdır ve bu en kötü durumu temsil eder):
+--
+--   notifications_cursor_idx ile : Seq Scan, 99.980 satır filtreyle atıldı,
+--                                  4083 buffer, 13.77 ms
+--   bu index ile                 : Index Scan, Index Cond: status = ANY(...),
+--                                  8 buffer, 0.13 ms
+--
+-- Yaklaşık 100 kat fark ve Seq Scan tablo büyüdükçe doğrusal kötüleşir. Index boyutu
+-- 4.8 MB, mevcut cursor index'inden (7.9 MB) küçük.
+--
+-- Kolon sırası sorgunun şeklini izliyor: eşitlik (status) → sıralama (created_at, id).
+-- Çoklu durum filtresinde (status = ANY ile birden fazla değer) sıralama garanti
+-- edilemediği için planda küçük bir Sort kalır; yalnızca sayfa boyutu kadar satır
+-- sıralandığı için maliyeti önemsiz.
+--
+-- Yalnızca channel filtresi için AYRI bir index eklenmedi: ölçümde o sorgu da Seq Scan
+-- yapıyor (8.9 ms) ama channel'ın yalnızca üç değeri var ve çok kanallı bir bildirim
+-- sisteminde üçü de anlamlı hacimde kullanılır, yani "nadir kanal" durumu 'failed' gibi
+-- yapısal değil. Ayrıca status+channel birlikte filtrelendiğinde planlayıcı Adım 2'deki
+-- notifications_claim_idx'i kullanıyor (0.12 ms). Gerekirse aynı ölçüm yöntemiyle eklenir.
+CREATE INDEX notifications_status_cursor_idx
+    ON notifications (status, created_at DESC, id DESC);
