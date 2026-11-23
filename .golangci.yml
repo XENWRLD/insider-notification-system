@@ -1,0 +1,41 @@
+# golangci-lint v2 yapilandirmasi.
+version: "2"
+
+linters:
+  # standard: errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - revive        # stil ve isimlendirme
+    - gosec         # guvenlik kokulari
+    - misspell      # yazim hatalari
+    - bodyclose     # kapatilmayan HTTP response body (worker/provider icin kritik)
+    - errorlint     # %w ile sarma ve errors.Is/As dogru kullanimi
+    - noctx         # context'siz HTTP istegi (timeout'suz cagri riski)
+    - sqlclosecheck # kapatilmayan rows/stmt
+  settings:
+    revive:
+      rules:
+        # Kod yorumlari Turkce yazildigi icin "Isim, ..." bicimindeki dogal
+        # Turkce cumle revive'in "Isim ..." sablonuna uymuyor. Yorumlarin
+        # varligi degil bicimi sorun oldugundan bu iki kural kapatildi.
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+
+  exclusions:
+    rules:
+      # Testlerde sabit kimlik bilgileri ve zayif rastgelelik kabul edilebilir.
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  # CI'da yeni kod kadar mevcut kod da temiz kalsin.
+  max-issues-per-linter: 0
+  max-same-issues: 0

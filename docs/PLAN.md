@@ -190,9 +190,9 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
 - [x] **Adım 0 — Ortam:** Go 1.27.4, Git 2.53, Docker 29.9 + Compose v5.7, GNU Make 4.4.1,
       golangci-lint 2.15, gh CLI 2.102, Claude Code; `git init -b main`, `.gitignore`,
       `.gitattributes` (`eol=lf`); GitHub reposu `insider-notification-system` (private)
-  - [ ] webhook.site URL'i alınacak (elle: https://webhook.site aç → kendi UUID'li URL'i
-        kopyala → Adım 1'de `.env.example` içine `PROVIDER_URL` olarak girer)
-- [ ] **Adım 1 — İskelet:** klasörler, `CLAUDE.md`, config, slog, compose (postgres + redis), `/health` → `chore: initialize project structure`
+  - [x] webhook.site URL'i alındı (`docs/webhook unique url.txt`; `.env.example` içinde
+        `PROVIDER_URL` olarak kullanılıyor)
+- [x] **Adım 1 — İskelet:** klasörler, `CLAUDE.md`, config, slog, compose (postgres + redis), `/health` → `chore: initialize project structure`
 - [ ] **Adım 2 — Veritabanı:** migration'lar, index'ler, migrate servisi → `feat: add database schema and migrations`
 - [ ] **Adım 3 — Tekil API:** create + validation + correlation ID → `feat: implement notification creation with validation`
 - [ ] **Adım 4 — Batch + idempotency** → `feat: add batch creation and idempotency`

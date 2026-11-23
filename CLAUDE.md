@@ -1,0 +1,69 @@
+# CLAUDE.md
+
+Insider One case study: Go ile event-driven bildirim sistemi (SMS / Email / Push).
+Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde — her oturumda
+önce o dosyaya bak, adımları sırayla uygula ve bitirdiğin adımın kutucuğunu işaretle.
+
+## Modül ve klasörler
+
+Modül yolu: `github.com/XENWRLD/insider-notification-system`
+
+| Klasör | Sorumluluk |
+|---|---|
+| `cmd/api` | HTTP API process'i |
+| `cmd/worker` | Kanal havuzları, claim/retry/reaper (Adım 6) |
+| `cmd/mockprovider` | Ayarlanabilir hata oranlı sahte sağlayıcı (Adım 6) |
+| `internal/config` | Ortam değişkenlerinden yapılandırma |
+| `internal/domain` | Modeller, durum makinesi, validation |
+| `internal/httpapi` | Router, middleware, handler'lar |
+| `internal/store` | PostgreSQL sorguları (elle yazılmış SQL) |
+| `internal/worker` | Havuzlar, claim, retry, reaper |
+| `internal/provider` | Dış sağlayıcı HTTP client'ı |
+| `internal/ratelimit` | Redis jeton kovası |
+| `internal/observability` | Logger, metrikler |
+| `migrations` | golang-migrate dosyaları |
+
+`internal/` dışına public paket koyma; bu bir uygulama, kütüphane değil.
+
+## Kurallar
+
+- **SQL elle yazılır**, ORM yok. Sorgular `internal/store` içinde kalır; handler ve worker
+  doğrudan SQL çalıştırmaz.
+- **Hata sarma:** `fmt.Errorf("bağlam: %w", err)`. Hata yutulmaz; `errors.Is/As` ile sınıflandırılır.
+- **Loglama:** yalnızca `log/slog`, JSON. Her log satırında mümkün olduğunda `correlation_id`
+  bulunur (`httpapi.CorrelationID(ctx)`); API ve worker ayrı process olduğu için bu kimlik
+  bildirim kaydıyla birlikte veritabanına yazılır ve worker loglarına oradan taşınır.
+- **Context:** her dış çağrı (DB, Redis, HTTP) context ile ve zaman aşımlı yapılır.
+  `context.Background()` yalnızca `main` içinde.
+- **Zaman aşımları açıkça verilir** — `http.Server` ve `http.Client` varsayılanları sınırsızdır.
+- **Testler kodun yanında:** `foo.go` → `foo_test.go`. Dış altyapı gerektiren testler
+  testcontainers ile; birim testleri arayüz stub'ları ile (`httpapi.Pinger` örneği).
+- **Yorumlar Türkçe** ve *neden*'i anlatır, *ne*'yi değil. `.golangci.yml` içinde revive'in
+  `exported` / `package-comments` kuralları bu yüzden kapalı.
+- **Satır sonu LF** (`.gitattributes`). Windows'ta CRLF ile checkout edilen script'ler
+  Linux container'da çalışmaz.
+- **Sırlar repoya girmez:** `.env` gitignore'da, örnek değerler `.env.example` içinde.
+- **Commit mesajları** conventional commits; her adımın mesajı `docs/PLAN.md` §8'de yazılı.
+  Adım bitmeden commit atma, adımı ikiye bölme.
+
+## Komutlar
+
+```bash
+make help        # tüm hedefler
+make env         # .env yoksa .env.example'dan üretir
+make up-build    # compose yığınını kurar ve başlatır
+make test        # go test ./...
+make lint        # golangci-lint run
+```
+
+## Ortam notu (Windows)
+
+Araçlar kurulu ama bir session'ın PATH'i eski kalmışsa doğrudan şu yollar kullanılabilir:
+
+| Araç | Yol |
+|---|---|
+| go 1.27.4 | `C:\Program Files\Go\bin\go.exe` |
+| GNU Make 4.4.1 | `%LOCALAPPDATA%\Microsoft\WinGet\Packages\ezwinports.make_*\bin\make.exe` |
+| golangci-lint 2.15.0 | `%LOCALAPPDATA%\Microsoft\WinGet\Packages\GolangCI.golangci-lint_*\golangci-lint-2.15.0-windows-amd64\golangci-lint.exe` |
+
+`docs/assessment/` şirkete ait belgedir; gitignore'da, repoya girmez.

@@ -1,0 +1,73 @@
+# Tek komutla çalışan geliştirme/demo ortamı: docker compose up --build
+#
+# worker, migrate ve mockprovider servisleri ilgili adımlarda (2 ve 6) eklenecek.
+name: insider-notification-system
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-insider}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-insider}
+      POSTGRES_DB: ${POSTGRES_DB:-notifications}
+    ports:
+      # Yalnızca localhost'a açılır: makine dışından erişilebilen açık bir veritabanı kalmasın.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18+ imajlari veriyi surum adli bir alt dizine koyar; mount bu yuzden
+      # /var/lib/postgresql/data degil /var/lib/postgresql seviyesinde olmali
+      # (aksi halde imaj "unused mount/volume" diyerek baslamiyor).
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      # pg_isready, sunucunun bağlantı kabul ettiğini doğrular; api yalnızca bundan sonra başlar.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-insider} -d ${POSTGRES_DB:-notifications}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    # appendonly kapalı: Redis yalnızca rate limit jetonları ve pub/sub için kullanılıyor,
+    # kaybı tolere edilebilir. Kalıcı veri PostgreSQL'de.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      args:
+        CMD: api
+    env_file: .env
+    environment:
+      # Container ağı içindeki adresler .env'deki değerleri ezer: aynı .env hem
+      # host'tan (make run) hem compose içinden çalışsın.
+      DATABASE_URL: postgres://${POSTGRES_USER:-insider}:${POSTGRES_PASSWORD:-insider}@postgres:5432/${POSTGRES_DB:-notifications}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    # SIGTERM sonrası graceful shutdown'a zaman tanınır (SHUTDOWN_TIMEOUT ile uyumlu).
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
