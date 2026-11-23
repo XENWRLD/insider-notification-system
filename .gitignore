@@ -36,3 +36,10 @@ desktop.ini
 
 # --- Şirkete ait assessment belgesi: public repoya girmesin ---
 docs/assessment/
+
+# --- Kişisel çalışma malzemesi: repoya girmez ---
+# Öğrenme notları ve slash komutları yalnızca benim hazırlığım için; teslim edilen
+# projenin parçası değil. Webhook URL'i de kişisel bir endpoint.
+docs/learning/
+.claude/commands/
+docs/webhook unique url.txt

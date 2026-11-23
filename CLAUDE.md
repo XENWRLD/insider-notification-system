@@ -74,8 +74,14 @@ Modül yolu: `github.com/XENWRLD/insider-notification-system`
 - **Sırlar repoya girmez:** `.env` gitignore'da, örnek değerler `.env.example` içinde.
 - **Commit mesajları** conventional commits; her adımın mesajı `docs/PLAN.md` §8'de yazılı.
   Adım bitmeden commit atma, adımı ikiye bölme.
-- **Adım bitince** `docs/PLAN.md` kutucuğunu işaretle *ve* bu dosyadaki **Durum** bölümünü
-  güncelle — sonraki oturumun tek giriş noktası orası.
+- **Adım bitirme akışı** (sırayı bozma):
+  1. Testler + lint geçer.
+  2. **COMMIT ATMADAN DUR.** `git diff --stat` ve dosya başına 1 cümlelik açıklama göster,
+     onay bekle.
+  3. Onay gelince `/adim-ozeti` talimatına göre öğrenme notunu yaz.
+  4. `docs/PLAN.md` kutucuğunu işaretle ve bu dosyadaki **Durum** bölümünü güncelle —
+     sonraki oturumun tek giriş noktası orası.
+  5. Commit.
 
 ## Komutlar
 
