@@ -1,0 +1,97 @@
+// Package domain, bildirim modelini, durum makinesini ve iş kurallarını barındırır.
+//
+// Bu paket HTTP ve SQL bilmez: ne JSON etiketleri ne de veritabanı sorguları içerir.
+// Böylece iş kuralları taşıma katmanından bağımsız test edilebilir ve aynı kurallar
+// hem API hem worker tarafından kullanılabilir.
+package domain
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// DefaultMaxAttempts, bir bildirimin kaç kez denenebileceği (docs/PLAN.md §6).
+const DefaultMaxAttempts = 5
+
+// Channel, bildirimin gönderileceği kanal.
+type Channel string
+
+// Desteklenen kanallar. Değerler veritabanındaki CHECK kısıtı ile birebir aynı.
+const (
+	ChannelSMS   Channel = "sms"
+	ChannelEmail Channel = "email"
+	ChannelPush  Channel = "push"
+)
+
+// Valid, kanalın desteklenen değerlerden biri olup olmadığını söyler.
+func (c Channel) Valid() bool {
+	switch c {
+	case ChannelSMS, ChannelEmail, ChannelPush:
+		return true
+	default:
+		return false
+	}
+}
+
+// Priority, işin kuyruktan çekilme önceliği.
+type Priority string
+
+// Öncelik değerleri. Sıralama metin üzerinden yapılmaz; veritabanındaki
+// priority_rank türetilmiş kolonu doğru sırayı garanti eder (alfabetik sırada
+// 'low' < 'normal' çıkardı).
+const (
+	PriorityHigh   Priority = "high"
+	PriorityNormal Priority = "normal"
+	PriorityLow    Priority = "low"
+)
+
+// Valid, önceliğin desteklenen değerlerden biri olup olmadığını söyler.
+func (p Priority) Valid() bool {
+	switch p {
+	case PriorityHigh, PriorityNormal, PriorityLow:
+		return true
+	default:
+		return false
+	}
+}
+
+// Notification, notifications tablosunun bir satırının karşılığı.
+//
+// Nullable kolonlar işaretçi (pointer) olarak tutulur: "değer yok" ile "sıfır değer"
+// arasındaki fark anlamlı — örneğin lease_token'ın boş olması işin sahipsiz olduğunu,
+// attempt_count'un 0 olması ise hiç denenmediğini söyler.
+type Notification struct {
+	ID      uuid.UUID
+	BatchID *uuid.UUID
+
+	Channel   Channel
+	Recipient string
+	Content   string
+	Priority  Priority
+	Status    Status
+
+	AttemptCount int
+	MaxAttempts  int
+
+	// AvailableAt, işin çekilebilir hâle geldiği an. Normal gönderim, retry gecikmesi
+	// ve zamanlanmış bildirim aynı alan üzerinden çalışır.
+	AvailableAt time.Time
+
+	// Lease: işi çeken worker'ın süreli sahipliği. İkisi birlikte dolu ya da birlikte
+	// boş olur; veritabanında CHECK kısıtı bunu garanti eder.
+	LeaseToken     *uuid.UUID
+	LeaseExpiresAt *time.Time
+
+	ProviderMessageID *string
+	LastError         *string
+
+	// CorrelationID, isteği uçtan uca izlemeye yarar. API ve worker ayrı process
+	// olduğu için kimlik veritabanı üzerinden worker loglarına taşınır.
+	CorrelationID string
+
+	TemplateID *uuid.UUID
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}

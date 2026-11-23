@@ -209,7 +209,11 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
   - [x] `priority` metin sıralaması hatası düzeltildi: `priority_rank` generated kolonu
         (alfabetik sırada `low` < `normal` çıkıyordu)
   - [x] `templates` tablosu bonus adıma bırakıldı; `template_id` FK'si o migration'da eklenecek
-- [ ] **Adım 3 — Tekil API:** create + validation + correlation ID → `feat: implement notification creation with validation`
+- [x] **Adım 3 — Tekil API:** create + validation + correlation ID → `feat: implement notification creation with validation`
+  - [x] SMS uzunluğu gerçek GSM 03.38 tablosuyla: küçük `ç` ve `ş ğ ı İ` tabloda **yok**,
+        büyük `Ç` (0x09) ve `ö ü Ö Ü` **var** → aynı metnin büyük/küçük hâli farklı sınıra tabi
+  - [x] Unicode sınırı rune değil **UTF-16 kod birimi** (emoji vekil çift = 2 birim)
+  - [x] API sözleşmesi sabitlendi: hata zarfı + `ErrorCode` enum'u + DTO (iç alanlar gizli)
 - [ ] **Adım 4 — Batch + idempotency** → `feat: add batch creation and idempotency`
 - [ ] **Adım 5 — Okuma + iptal:** get, batch özeti, cursor listeleme, atomik iptal → `feat: add query, listing and cancellation endpoints`
 
@@ -231,6 +235,11 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
 - [ ] **Bonus — WebSocket:** Redis pub/sub → `/ws` → `feat: add websocket status updates`
 - [ ] **Kanıt:** k6 yük testi, Prometheus + Grafana paneli → `chore: add load test and dashboards`
 - [ ] **Dokümantasyon:** OpenAPI + Swagger UI, README → `docs: add OpenAPI spec and README`
+  - [ ] OpenAPI'de `error` kodu enum'unu listele — tek kaynak: `internal/httpapi/errors.go`
+  - [ ] README'de RFC 9457 (`problem+json`) yerine düz hata zarfının neden seçildiğini
+        bir cümleyle açıkla
+  - [ ] README'de SMS uzunluk kuralını (GSM-7 160 / Unicode 70) ve Türkçe karakterin
+        maliyet etkisini belgele
 - [ ] **Son prova:** sıfırdan klon + demo senaryosu
 - [ ] **Mülakat provası**
 - [ ] *(Zaman kalırsa)* **Tracing:** OpenTelemetry + Jaeger

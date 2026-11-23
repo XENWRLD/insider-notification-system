@@ -10,16 +10,19 @@ import (
 )
 
 // Dependencies, router'ın ihtiyaç duyduğu dış bağımlılıkları taşır.
-// Sonraki adımlarda store, rate limiter ve metrik kayıt defteri buraya eklenir.
+// Sonraki adımlarda rate limiter ve metrik kayıt defteri buraya eklenir.
 type Dependencies struct {
 	Logger *slog.Logger
 	// Health, readiness kontrolünde ping'lenecek bağımlılıklar (ad → Pinger).
 	Health map[string]Pinger
+	// Notifications, bildirim uçlarının kullandığı veri erişimi.
+	Notifications NotificationStore
 }
 
 // NewRouter, middleware zinciri kurulmuş HTTP handler'ını döner.
 func NewRouter(deps Dependencies) http.Handler {
 	health := healthHandler{logger: deps.Logger, dependencies: deps.Health}
+	notifications := notificationHandler{logger: deps.Logger, store: deps.Notifications}
 
 	router := chi.NewRouter()
 
@@ -34,11 +37,23 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.Use(requestLogger(deps.Logger))
 	router.Use(middleware.Recoverer)
 
+	// chi'nin varsayılan 404/405 handler'ları düz metin döner; API'nin geri kalanıyla
+	// aynı hata zarfını kullanmaları için değiştiriliyor.
+	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, r, http.StatusNotFound, CodeNotFound, "kaynak bulunamadı")
+	})
+	router.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, r, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
+			"bu yol için HTTP method'u desteklenmiyor")
+	})
+
 	router.Get("/health/live", health.live)
 	router.Get("/health/ready", health.ready)
 
-	// Sürümlü API tabanı: uçlar Adım 3'ten itibaren eklenir.
-	router.Route("/api/v1", func(chi.Router) {})
+	// Sürümlü API tabanı: batch (Adım 4), okuma ve iptal (Adım 5) buraya eklenecek.
+	router.Route("/api/v1", func(api chi.Router) {
+		api.Post("/notifications", notifications.create)
+	})
 
 	return router
 }

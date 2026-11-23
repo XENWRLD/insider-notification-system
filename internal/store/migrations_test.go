@@ -1,145 +1,40 @@
-// Migration testleri gerçek bir PostgreSQL 18 container'ında koşar.
+// Şemanın davranış testleri: generated kolon, CHECK kısıtları, trigger ve index'ler.
 //
-// Neden sahte (mock) değil? Test edilen şey SQL'in kendisi: generated kolon, CHECK
-// kısıtları, trigger ve index'ler. Bunların davranışı yalnızca gerçek Postgres'te
-// doğrulanabilir. Testler `go test -short` ile atlanır, böylece Docker'sız makinede
-// (ör. hızlı lint döngüsünde) test paketi yine derlenir.
+// Neden sahte (mock) değil? Test edilen şey SQL'in kendisi; bu özelliklerin davranışı
+// yalnızca gerçek Postgres'te doğrulanabilir.
 package store
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// migrationsSource, migrations klasörünün bu test dosyasına göre konumu.
-// Klasör yalnızca SQL içersin diye test burada duruyor (CLAUDE.md: DB kodu internal/store).
-const migrationsSource = "file://../../migrations"
-
-// startPostgres, tek seferlik bir Postgres container'ı başlatır ve DSN'ini döner.
-func startPostgres(t *testing.T) string {
-	t.Helper()
-
-	if testing.Short() {
-		t.Skip("testcontainers Docker gerektirir; -short ile atlandı")
-	}
-
-	ctx := context.Background()
-
-	container, err := tcpostgres.Run(ctx, "postgres:18-alpine",
-		tcpostgres.WithDatabase("notifications_test"),
-		tcpostgres.WithUsername("test"),
-		tcpostgres.WithPassword("test"),
-		// Postgres ilk açılışta bir kez başlayıp kapanır; "ready" satırını iki kez
-		// beklemek, henüz hazır olmayan sunucuya bağlanmayı önler.
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
-		),
-	)
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		require.NoError(t, testcontainers.TerminateContainer(container))
-	})
-
-	// pgx5:// şeması bilinçli: golang-migrate'in varsayılan postgres sürücüsü lib/pq
-	// çekerdi, böylece projede tek bir Postgres sürücüsü (pgx) kalıyor.
-	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-
-	return dsn
-}
-
-// newMigrator, verilen DSN için migrate örneği kurar.
-func newMigrator(t *testing.T, dsn string) *migrate.Migrate {
-	t.Helper()
-
-	m, err := migrate.New(migrationsSource, strings.Replace(dsn, "postgres://", "pgx5://", 1))
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		sourceErr, dbErr := m.Close()
-		require.NoError(t, sourceErr)
-		require.NoError(t, dbErr)
-	})
-
-	return m
-}
-
-// connect, şema doğrulaması için bir bağlantı havuzu açar.
-func connect(t *testing.T, dsn string) *pgxpool.Pool {
-	t.Helper()
-
-	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
-
-	require.NoError(t, pool.Ping(ctx))
-
-	return pool
-}
-
-// tableNames, schema_migrations dışındaki tabloları alfabetik döner.
-func tableNames(t *testing.T, pool *pgxpool.Pool) []string {
-	t.Helper()
-
-	rows, err := pool.Query(context.Background(), `
-		SELECT table_name
-		FROM information_schema.tables
-		WHERE table_schema = 'public'
-		  AND table_type = 'BASE TABLE'
-		  AND table_name <> 'schema_migrations'
-		ORDER BY table_name`)
-	require.NoError(t, err)
-	defer rows.Close()
-
-	var names []string
-	for rows.Next() {
-		var name string
-		require.NoError(t, rows.Scan(&name))
-		names = append(names, name)
-	}
-	require.NoError(t, rows.Err())
-
-	return names
-}
+// schemaTables, migration'lar uygulandığında beklenen tablolar.
+var schemaTables = []string{"idempotency_keys", "notification_attempts", "notifications"}
 
 // TestMigrationsUpDownUp, down dosyalarının gerçekten çalıştığını kanıtlar.
 //
-// Bu test olmadan down migration'lar yalnızca "yazılmış" olur; bozuk bir down,
-// ancak production'da geri alma gerektiğinde fark edilirdi.
+// Bu test olmadan down migration'lar yalnızca "yazılmış" olur; bozuk bir down, ancak
+// production'da geri alma gerektiğinde — yani en kötü anda — fark edilirdi.
+// Şemayı değiştirdiği için kendi container'ında koşar.
 func TestMigrationsUpDownUp(t *testing.T) {
-	dsn := startPostgres(t)
-	m := newMigrator(t, dsn)
-	pool := connect(t, dsn)
+	migrator, pool := dedicatedPostgres(t)
 
-	expected := []string{"idempotency_keys", "notification_attempts", "notifications"}
+	require.NoError(t, migrator.Up())
+	require.Equal(t, schemaTables, tableNames(t, pool))
 
-	require.NoError(t, m.Up())
-	require.Equal(t, expected, tableNames(t, pool))
-
-	// Tüm migration'lar geri alınır: şemada schema_migrations dışında tablo kalmamalı.
-	require.NoError(t, m.Down())
+	// Tüm migration'lar geri alınır: schema_migrations dışında tablo kalmamalı.
+	require.NoError(t, migrator.Down())
 	require.Empty(t, tableNames(t, pool))
 
-	// Trigger'ın fonksiyonu da düşmeli; aksi halde ikinci Up "already exists" ile patlar.
-	require.NoError(t, m.Up())
-	require.Equal(t, expected, tableNames(t, pool))
+	// Trigger'ın fonksiyonu da düşmeli; aksi hâlde ikinci Up "already exists" ile patlar.
+	require.NoError(t, migrator.Up())
+	require.Equal(t, schemaTables, tableNames(t, pool))
 }
 
 // TestExpectedIndexesExist, sıcak yol index'lerinin varlığını sabitler.
@@ -147,11 +42,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 // Index'ler performans sözleşmesinin parçası; birinin sessizce düşmesi testle değil
 // ancak yük testiyle fark edilirdi.
 func TestExpectedIndexesExist(t *testing.T) {
-	dsn := startPostgres(t)
-	m := newMigrator(t, dsn)
-	pool := connect(t, dsn)
-
-	require.NoError(t, m.Up())
+	pool := sharedPool(t)
 
 	for _, index := range []string{
 		"notifications_claim_idx",
@@ -170,8 +61,8 @@ func TestExpectedIndexesExist(t *testing.T) {
 	}
 }
 
-// insertNotification, testler için geçerli bir bildirim satırı ekler.
-func insertNotification(t *testing.T, pool *pgxpool.Pool, channel, priority string) uuid.UUID {
+// insertRawNotification, şema testleri için doğrudan SQL ile satır ekler.
+func insertRawNotification(t *testing.T, pool *pgxpool.Pool, channel, priority string) uuid.UUID {
 	t.Helper()
 
 	id := uuid.New()
@@ -190,15 +81,11 @@ func insertNotification(t *testing.T, pool *pgxpool.Pool, channel, priority stri
 // priority metin olarak sıralanırsa alfabetik sıra 'high' < 'low' < 'normal' olur ve
 // düşük öncelik normali geçer. priority_rank bunu düzeltiyor; test de bunu sabitliyor.
 func TestPriorityRankOrdering(t *testing.T) {
-	dsn := startPostgres(t)
-	m := newMigrator(t, dsn)
-	pool := connect(t, dsn)
+	pool := sharedPool(t)
 
-	require.NoError(t, m.Up())
-
-	// Ekleme sırası bilerek karışık: sıralamayı index/rank sağlamalı, insert sırası değil.
+	// Ekleme sırası bilerek karışık: sıralamayı rank sağlamalı, insert sırası değil.
 	for _, priority := range []string{"low", "high", "normal"} {
-		insertNotification(t, pool, "sms", priority)
+		insertRawNotification(t, pool, "sms", priority)
 	}
 
 	rows, err := pool.Query(context.Background(),
@@ -228,11 +115,7 @@ func TestPriorityRankOrdering(t *testing.T) {
 
 // TestConstraintsRejectInvalidRows, CHECK kısıtlarının gerçekten koruduğunu doğrular.
 func TestConstraintsRejectInvalidRows(t *testing.T) {
-	dsn := startPostgres(t)
-	m := newMigrator(t, dsn)
-	pool := connect(t, dsn)
-
-	require.NoError(t, m.Up())
+	pool := sharedPool(t)
 
 	ctx := context.Background()
 	correlationID := uuid.NewString()
@@ -241,7 +124,6 @@ func TestConstraintsRejectInvalidRows(t *testing.T) {
 		name    string
 		channel string
 		status  string
-		extra   string
 	}{
 		{name: "geçersiz kanal", channel: "fax", status: "pending"},
 		{name: "geçersiz durum", channel: "sms", status: "unknown"},
@@ -270,14 +152,10 @@ func TestConstraintsRejectInvalidRows(t *testing.T) {
 
 // TestUpdatedAtTrigger, trigger'ın her UPDATE'te updated_at'i ilerlettiğini doğrular.
 func TestUpdatedAtTrigger(t *testing.T) {
-	dsn := startPostgres(t)
-	m := newMigrator(t, dsn)
-	pool := connect(t, dsn)
-
-	require.NoError(t, m.Up())
+	pool := sharedPool(t)
 
 	ctx := context.Background()
-	id := insertNotification(t, pool, "email", "normal")
+	id := insertRawNotification(t, pool, "email", "normal")
 
 	var before time.Time
 	require.NoError(t, pool.QueryRow(ctx,
@@ -301,14 +179,10 @@ func TestUpdatedAtTrigger(t *testing.T) {
 
 // TestAttemptsCascadeAndUniqueness, deneme kayıtlarının bütünlüğünü doğrular.
 func TestAttemptsCascadeAndUniqueness(t *testing.T) {
-	dsn := startPostgres(t)
-	m := newMigrator(t, dsn)
-	pool := connect(t, dsn)
-
-	require.NoError(t, m.Up())
+	pool := sharedPool(t)
 
 	ctx := context.Background()
-	id := insertNotification(t, pool, "push", "high")
+	id := insertRawNotification(t, pool, "push", "high")
 
 	insertAttempt := func(attemptNo int) error {
 		_, err := pool.Exec(ctx, `
@@ -336,11 +210,7 @@ func TestAttemptsCascadeAndUniqueness(t *testing.T) {
 // TestIdempotencyKeyConflict, bileşik PK'nın atomik "daha önce gördüm mü?" kontrolünü
 // sağladığını doğrular.
 func TestIdempotencyKeyConflict(t *testing.T) {
-	dsn := startPostgres(t)
-	m := newMigrator(t, dsn)
-	pool := connect(t, dsn)
-
-	require.NoError(t, m.Up())
+	pool := sharedPool(t)
 
 	ctx := context.Background()
 	insert := `

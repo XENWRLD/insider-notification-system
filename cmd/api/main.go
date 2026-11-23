@@ -22,6 +22,7 @@ import (
 	"github.com/XENWRLD/insider-notification-system/internal/config"
 	"github.com/XENWRLD/insider-notification-system/internal/httpapi"
 	"github.com/XENWRLD/insider-notification-system/internal/observability"
+	"github.com/XENWRLD/insider-notification-system/internal/store"
 )
 
 const (
@@ -81,12 +82,15 @@ func run() error {
 		}
 	}()
 
+	notificationStore := store.New(pool)
+
 	handler := httpapi.NewRouter(httpapi.Dependencies{
 		Logger: logger,
 		Health: map[string]httpapi.Pinger{
 			"postgres": pool,
 			"redis":    redisPinger{client: redisClient},
 		},
+		Notifications: notificationStore,
 	})
 
 	server := &http.Server{

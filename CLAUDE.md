@@ -11,10 +11,11 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 
 - **Tamamlanan:** Adım 0 (ortam), Adım 1 (iskelet: config, slog, chi router, correlation ID,
   `/health/live`, `/health/ready`, Dockerfile, compose = postgres 18 + redis 8 + api),
-  Adım 2 (şema: 3 migration, 4 index, `migrate` servisi, testcontainers testleri)
-- **Sıradaki:** Adım 3 — tekil `POST /api/v1/notifications`: `internal/domain` (model, durum
-  makinesi, kanal bazlı validation), `internal/store` (elle yazılmış SQL), handler + testler
-- **Henüz boş** (`.gitkeep`): `internal/{domain,worker,provider,ratelimit}`, `cmd/worker`,
+  Adım 2 (şema: 3 migration, 4 index, `migrate` servisi, testcontainers testleri),
+  Adım 3 (domain + store + `POST /api/v1/notifications`, API sözleşmesi)
+- **Sıradaki:** Adım 4 — batch (`POST /api/v1/notifications/batch`, 1–1000, tek transaction)
+  ve idempotency (`Idempotency-Key`; aynı key+payload → eski cevap, farklı payload → 409)
+- **Henüz boş** (`.gitkeep`): `internal/{worker,provider,ratelimit}`, `cmd/worker`,
   `cmd/mockprovider`, `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
   `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`
@@ -32,6 +33,25 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 - `status = 'processing'` satırı lease'siz olamaz (CHECK); reaper bu değişmeze güvenir.
 - Claim index'i **kısmi**: yalnızca `pending`/`retrying` satırlarını tutar, `sent` kayıtları
   milyonlara çıksa da büyümez.
+
+### API sözleşmesi (Adım 3'te sabitlendi)
+
+- **Hata zarfı** (tüm uçlar, 404/405 dahil): `{error, message, fields?, correlation_id}`.
+  `correlation_id` **her** hata yanıtında bulunur. RFC 9457 yerine bu biçim seçildi.
+- **`error` kodları tek kaynaktan**: `internal/httpapi/errors.go` içindeki `ErrorCode`
+  sabitleri. Yeni kod eklenince OpenAPI de güncellenir.
+- **`fields`** alan adı → mesaj haritası. Batch uçlarında anahtar `notifications[3].recipient`
+  biçiminde olur (`writeValidationError`'a önek geçilir).
+- **Tüm alan hataları tek yanıtta** döner. İstisna: `channel` geçersizse alıcı/içerik
+  **biçimi** doğrulanmaz (hangi kuralın geçerli olduğu bilinemez), yalnızca boşluk kontrolü yapılır.
+- **Yanıt DTO'su ayrıdır** (`notificationResponse`): `domain.Notification` doğrudan
+  serialize **edilmez**. `lease_token`, `lease_expires_at`, `priority_rank`, `template_id`
+  dışarı çıkmaz. `GET /notifications/{id}` (Adım 5) aynı şemayı kullanacak.
+- **Oluşturma** `202` + `Location` header döner (201 değil: kayıt oluştu, gönderim olmadı).
+- **SMS uzunluğu** GSM 03.38 tablosuna göre: kodlanabiliyorsa 160 septet, aksi hâlde
+  70 **UTF-16 kod birimi** (emoji = 2 birim). Küçük `ç` ve `ş ğ ı İ` tabloda yok;
+  büyük `Ç` ve `ö ü Ö Ü` var.
+- **Validation domain'de**, veritabanı CHECK kısıtları ikinci savunma hattı.
 
 ## Modül ve klasörler
 
@@ -111,5 +131,20 @@ Araçlar kurulu ama bir session'ın PATH'i eski kalmışsa doğrudan şu yollar 
 | go 1.27.4 | `C:\Program Files\Go\bin\go.exe` |
 | GNU Make 4.4.1 | `%LOCALAPPDATA%\Microsoft\WinGet\Packages\ezwinports.make_*\bin\make.exe` |
 | golangci-lint 2.15.0 | `%LOCALAPPDATA%\Microsoft\WinGet\Packages\GolangCI.golangci-lint_*\golangci-lint-2.15.0-windows-amd64\golangci-lint.exe` |
+
+### Git Bash'te UTF-8 gövde göndermek
+
+`curl -d '...'` ile **Türkçe karakter veya emoji gönderilemez**: Git Bash, argümanı
+`curl.exe`'ye geçirirken Windows ANSI kod sayfasına çevirir ve `ü` → `�`, `🎉` → `??`
+olur. Sunucu bozuk veri alır, test sonucu yanıltıcı çıkar. Gövdeyi dosyaya yazıp
+`--data-binary @dosya` kullan — borular ve yönlendirmeler baytı korur:
+
+```bash
+printf '{"channel":"sms","recipient":"+905551234567","content":"%s"}' "$(printf 'ş%.0s' $(seq 1 71))" > /tmp/body.json
+curl -s -X POST localhost:8080/api/v1/notifications \
+  -H 'Content-Type: application/json' --data-binary @/tmp/body.json
+```
+
+(Aynı sınıf sorun Makefile'daki `MSYS_NO_PATHCONV` ihtiyacının da kaynağı.)
 
 `docs/assessment/` şirkete ait belgedir; gitignore'da, repoya girmez.
