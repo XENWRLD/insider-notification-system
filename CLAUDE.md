@@ -4,6 +4,19 @@ Insider One case study: Go ile event-driven bildirim sistemi (SMS / Email / Push
 Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde — her oturumda
 önce o dosyaya bak, adımları sırayla uygula ve bitirdiğin adımın kutucuğunu işaretle.
 
+## Durum
+
+> Bu bölüm her adımın commit'inde güncellenir. Yeni bir oturumda yalnızca bu dosyayı ve
+> `docs/PLAN.md` §8'i okumak yeterli olmalı; kodun tamamını taramaya gerek yok.
+
+- **Tamamlanan:** Adım 0 (ortam), Adım 1 (iskelet: config, slog, chi router, correlation ID,
+  `/health/live`, `/health/ready`, Dockerfile, compose = postgres 18 + redis 8 + api)
+- **Sıradaki:** Adım 2 — veritabanı şeması, migration'lar, index'ler, compose'a `migrate` servisi
+- **Henüz boş** (`.gitkeep`): `internal/{domain,store,worker,provider,ratelimit}`, `cmd/worker`,
+  `cmd/mockprovider`, `migrations`, `api`, `deploy`, `loadtest`
+- **Doğrulama:** `make test && make lint && make up-build`, ardından
+  `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`
+
 ## Modül ve klasörler
 
 Modül yolu: `github.com/XENWRLD/insider-notification-system`
@@ -45,6 +58,8 @@ Modül yolu: `github.com/XENWRLD/insider-notification-system`
 - **Sırlar repoya girmez:** `.env` gitignore'da, örnek değerler `.env.example` içinde.
 - **Commit mesajları** conventional commits; her adımın mesajı `docs/PLAN.md` §8'de yazılı.
   Adım bitmeden commit atma, adımı ikiye bölme.
+- **Adım bitince** `docs/PLAN.md` kutucuğunu işaretle *ve* bu dosyadaki **Durum** bölümünü
+  güncelle — sonraki oturumun tek giriş noktası orası.
 
 ## Komutlar
 
