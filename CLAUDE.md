@@ -10,12 +10,28 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 > `docs/PLAN.md` §8'i okumak yeterli olmalı; kodun tamamını taramaya gerek yok.
 
 - **Tamamlanan:** Adım 0 (ortam), Adım 1 (iskelet: config, slog, chi router, correlation ID,
-  `/health/live`, `/health/ready`, Dockerfile, compose = postgres 18 + redis 8 + api)
-- **Sıradaki:** Adım 2 — veritabanı şeması, migration'lar, index'ler, compose'a `migrate` servisi
-- **Henüz boş** (`.gitkeep`): `internal/{domain,store,worker,provider,ratelimit}`, `cmd/worker`,
-  `cmd/mockprovider`, `migrations`, `api`, `deploy`, `loadtest`
-- **Doğrulama:** `make test && make lint && make up-build`, ardından
+  `/health/live`, `/health/ready`, Dockerfile, compose = postgres 18 + redis 8 + api),
+  Adım 2 (şema: 3 migration, 4 index, `migrate` servisi, testcontainers testleri)
+- **Sıradaki:** Adım 3 — tekil `POST /api/v1/notifications`: `internal/domain` (model, durum
+  makinesi, kanal bazlı validation), `internal/store` (elle yazılmış SQL), handler + testler
+- **Henüz boş** (`.gitkeep`): `internal/{domain,worker,provider,ratelimit}`, `cmd/worker`,
+  `cmd/mockprovider`, `api`, `deploy`, `loadtest`
+- **Doğrulama:** `make lint && make test && make up-build`, ardından
   `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`
+  ve `docker compose ps -a` → `migrate` servisi `Exited (0)`, `api` `Up (healthy)`
+
+### Şema notları (Adım 2)
+
+- Tablolar: `notifications`, `notification_attempts`, `idempotency_keys`.
+  `templates` **yok** — 3. gün bonusunda kendi migration'ı ile gelir, `template_id` FK'si de orada.
+- `priority` text olarak kalır ama sıralama `priority_rank` (generated, STORED) üzerinden
+  yapılır: metin index'i alfabetik sıralayıp `low`'u `normal`'ın önüne geçiriyordu.
+- Sabit küme alanları ENUM değil `text` + `CHECK`; yeni değer eklemek tek satır ALTER
+  ve pgx'te tip kaydı gerekmiyor.
+- `updated_at` trigger (`set_updated_at`) ile yazılır — store sorgularında elle yazılmaz.
+- `status = 'processing'` satırı lease'siz olamaz (CHECK); reaper bu değişmeze güvenir.
+- Claim index'i **kısmi**: yalnızca `pending`/`retrying` satırlarını tutar, `sent` kayıtları
+  milyonlara çıksa da büyümez.
 
 ## Modül ve klasörler
 
@@ -67,9 +83,18 @@ Modül yolu: `github.com/XENWRLD/insider-notification-system`
 make help        # tüm hedefler
 make env         # .env yoksa .env.example'dan üretir
 make up-build    # compose yığınını kurar ve başlatır
-make test        # go test ./...
+make test        # go test ./...  (testcontainers testleri Docker ister)
+make test-unit   # go test -short ./...  (Docker gerektirmez)
 make lint        # golangci-lint run
+
+make migrate-up        # bekleyen migration'lari uygular
+make migrate-down N=1  # son N migration'i geri alir
+make migrate-version   # mevcut sema surumu
+make migrate-create NAME=add_templates  # yeni migration cifti
 ```
+
+`make up` zaten compose'daki `migrate` servisini çalıştırır; `migrate-*` hedefleri elle
+müdahale içindir. Hepsi compose üzerinden koşar, yerelde golang-migrate CLI'si gerekmez.
 
 ## Ortam notu (Windows)
 

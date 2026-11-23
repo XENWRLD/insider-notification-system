@@ -7,11 +7,16 @@ linters:
   enable:
     - revive        # stil ve isimlendirme
     - gosec         # guvenlik kokulari
-    - misspell      # yazim hatalari
     - bodyclose     # kapatilmayan HTTP response body (worker/provider icin kritik)
     - errorlint     # %w ile sarma ve errors.Is/As dogru kullanimi
     - noctx         # context'siz HTTP istegi (timeout'suz cagri riski)
     - sqlclosecheck # kapatilmayan rows/stmt
+
+  # misspell bilincli olarak kapali: yalnizca Ingilizce sozluge bakiyor ve Turkce
+  # yorumlarin ICINDEKI harf dizilerini yanlis yazim sayiyor ("carpismamali" ->
+  # "mamal"/"mammal"). Yorumlar Turkce yazildigi icin uretecegi her bulgu yanlis
+  # pozitif olurdu; ignore listesi her yeni Turkce kelimeyle buyurdu.
+
   settings:
     revive:
       rules:

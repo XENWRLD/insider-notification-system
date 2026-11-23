@@ -92,7 +92,19 @@ retry, gözlemlenebilirlik).
 `lease_token (uuid, null)`, `lease_expires_at`, `provider_message_id`, `last_error`,
 `correlation_id`, `template_id (null)`, `created_at`, `updated_at`
 
-Index: `(channel, status, priority, available_at)`, `(batch_id)`, `(created_at, id)`
+Ek kolon: `priority_rank (smallint, generated)` — `priority` metin olarak index'lenirse sıralama
+alfabetik olur (`high` < `low` < `normal`) ve düşük öncelik normali geçerdi.
+
+Index (Adım 2'de kurulan hali):
+
+| Index | Sorgu |
+|---|---|
+| `(channel, priority_rank, available_at, id) WHERE status IN ('pending','retrying')` | Worker claim — kısmi index, `sent` satırlarıyla büyümez |
+| `(lease_expires_at) WHERE status = 'processing'` | Reaper |
+| `(batch_id, status) WHERE batch_id IS NOT NULL` | Batch özeti |
+| `(created_at DESC, id DESC)` | Cursor pagination |
+
+`status` / `channel` filtre index'leri Adım 5'te gerçek sorgu + `EXPLAIN` ile kararlaştırılır.
 
 **notification_attempts** — her denemenin kaydı: `notification_id`, `attempt_no`, `status_code`,
 `error`, `duration_ms`, `created_at`
@@ -193,7 +205,10 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
   - [x] webhook.site URL'i alındı (`docs/webhook unique url.txt`; `.env.example` içinde
         `PROVIDER_URL` olarak kullanılıyor)
 - [x] **Adım 1 — İskelet:** klasörler, `CLAUDE.md`, config, slog, compose (postgres + redis), `/health` → `chore: initialize project structure`
-- [ ] **Adım 2 — Veritabanı:** migration'lar, index'ler, migrate servisi → `feat: add database schema and migrations`
+- [x] **Adım 2 — Veritabanı:** migration'lar, index'ler, migrate servisi → `feat: add database schema and migrations`
+  - [x] `priority` metin sıralaması hatası düzeltildi: `priority_rank` generated kolonu
+        (alfabetik sırada `low` < `normal` çıkıyordu)
+  - [x] `templates` tablosu bonus adıma bırakıldı; `template_id` FK'si o migration'da eklenecek
 - [ ] **Adım 3 — Tekil API:** create + validation + correlation ID → `feat: implement notification creation with validation`
 - [ ] **Adım 4 — Batch + idempotency** → `feat: add batch creation and idempotency`
 - [ ] **Adım 5 — Okuma + iptal:** get, batch özeti, cursor listeleme, atomik iptal → `feat: add query, listing and cancellation endpoints`

@@ -1,0 +1,4 @@
+-- Ters sıra: trigger → function → tablo. Index'ler tabloyla birlikte düşer.
+DROP TRIGGER IF EXISTS notifications_set_updated_at ON notifications;
+DROP FUNCTION IF EXISTS set_updated_at();
+DROP TABLE IF EXISTS notifications;

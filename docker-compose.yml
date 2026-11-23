@@ -1,6 +1,6 @@
 # Tek komutla çalışan geliştirme/demo ortamı: docker compose up --build
 #
-# worker, migrate ve mockprovider servisleri ilgili adımlarda (2 ve 6) eklenecek.
+# worker ve mockprovider servisleri Adım 6'da eklenecek.
 name: insider-notification-system
 
 services:
@@ -41,6 +41,25 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Tek seferlik (one-shot) job: şemayı kurar ve çıkar. api bunun başarıyla bitmesini
+  # bekler — Adım 1'deki bağımlılık beklemesi "Postgres ayakta" diyor ama "tablolar var"
+  # demiyordu; migration'ı uygulama içinde çalıştırmak ise birden çok kopya ölçeklendiğinde
+  # yarış durumu yaratırdı.
+  migrate:
+    image: migrate/migrate:v4.20.1
+    volumes:
+      # Read-write bağlanıyor: `make migrate-create` yeni dosya çiftini buraya üretir.
+      - ./migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER:-insider}:${POSTGRES_PASSWORD:-insider}@postgres:5432/${POSTGRES_DB:-notifications}?sslmode=disable"
+      - "up"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Başarıyla bitip çıkması normaldir; yeniden başlatılmamalı.
+    restart: "no"
+
   api:
     build:
       context: .
@@ -59,6 +78,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health/live"]
       interval: 10s
