@@ -4,6 +4,7 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -17,12 +18,32 @@ type Dependencies struct {
 	Health map[string]Pinger
 	// Notifications, bildirim uçlarının kullandığı veri erişimi.
 	Notifications NotificationStore
+
+	// BodyLimitSingle / BodyLimitBatch, uç başına gövde sınırı (bayt).
+	// Batch'in sınırı çok daha büyük: 1000 e-posta en kötü durumda ~10 MB tutar.
+	BodyLimitSingle int64
+	BodyLimitBatch  int64
+
+	// IdempotencyTTL, saklanan idempotency cevaplarının geçerlilik süresi.
+	IdempotencyTTL time.Duration
 }
 
 // NewRouter, middleware zinciri kurulmuş HTTP handler'ını döner.
 func NewRouter(deps Dependencies) http.Handler {
 	health := healthHandler{logger: deps.Logger, dependencies: deps.Health}
-	notifications := notificationHandler{logger: deps.Logger, store: deps.Notifications}
+
+	notifications := notificationHandler{
+		logger: deps.Logger,
+		store:  deps.Notifications,
+		singleLimit: bodyLimit{
+			bytes: deps.BodyLimitSingle,
+		},
+		batchLimit: bodyLimit{
+			bytes:  deps.BodyLimitBatch,
+			advice: "batch'i daha küçük parçalara bölün",
+		},
+		idempotencyTTL: deps.IdempotencyTTL,
+	}
 
 	router := chi.NewRouter()
 
@@ -50,9 +71,10 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.Get("/health/live", health.live)
 	router.Get("/health/ready", health.ready)
 
-	// Sürümlü API tabanı: batch (Adım 4), okuma ve iptal (Adım 5) buraya eklenecek.
+	// Sürümlü API tabanı: okuma ve iptal uçları (Adım 5) buraya eklenecek.
 	router.Route("/api/v1", func(api chi.Router) {
 		api.Post("/notifications", notifications.create)
+		api.Post("/notifications/batch", notifications.createBatch)
 	})
 
 	return router

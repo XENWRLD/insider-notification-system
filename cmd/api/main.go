@@ -90,7 +90,10 @@ func run() error {
 			"postgres": pool,
 			"redis":    redisPinger{client: redisClient},
 		},
-		Notifications: notificationStore,
+		Notifications:   notificationStore,
+		BodyLimitSingle: cfg.BodyLimitSingle,
+		BodyLimitBatch:  cfg.BodyLimitBatch,
+		IdempotencyTTL:  cfg.IdempotencyTTL,
 	})
 
 	server := &http.Server{

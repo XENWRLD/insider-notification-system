@@ -4,36 +4,100 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
+	"github.com/XENWRLD/insider-notification-system/internal/store"
+)
+
+// Test gövde sınırları: gerçek varsayılanlardan küçük tutuluyor ki testler
+// megabaytlarca veri üretmek zorunda kalmasın. Batch sınırı 1000 öğeyi rahat
+// alacak kadar büyük — boyut doğrulamasını gövde sınırı gölgelemesin.
+const (
+	testSingleLimit = 4 << 10   // 4 KiB
+	testBatchLimit  = 256 << 10 // 256 KiB
 )
 
 // stubNotificationStore, testlerde gerçek veritabanı yerine kullanılan store.
 type stubNotificationStore struct {
+	// err, her iki metodun da döneceği hata.
 	err error
+	// outcome, store'un döneceği sonuç (replay senaryoları için).
+	outcome store.Outcome
+
 	// saved, CreateNotification'a geçirilen kaydı tutar.
 	saved *domain.Notification
+	// savedBatch, CreateBatch'e geçirilen kayıtları tutar.
+	savedBatch []*domain.Notification
+	// idem, son çağrıda geçirilen koruma parametreleri.
+	idem store.IdempotencyRequest
+	// rendered, renderResponse'un ürettiği cevap — store'un ne sakladığını görmek için.
+	rendered any
 }
 
-func (s *stubNotificationStore) CreateNotification(_ context.Context, n *domain.Notification) error {
+func (s *stubNotificationStore) CreateNotification(
+	_ context.Context, n *domain.Notification,
+	idem store.IdempotencyRequest, renderResponse func() any,
+) (store.Outcome, error) {
+	s.idem = idem
+
 	if s.err != nil {
-		return s.err
+		return store.Outcome{}, s.err
+	}
+	if s.outcome.Replayed {
+		return s.outcome, nil
 	}
 
 	s.saved = n
+	s.rendered = renderResponse()
 
-	return nil
+	return store.Outcome{}, nil
+}
+
+func (s *stubNotificationStore) CreateBatch(
+	_ context.Context, notifications []*domain.Notification,
+	idem store.IdempotencyRequest, renderResponse func() any,
+) (store.Outcome, error) {
+	s.idem = idem
+
+	if s.err != nil {
+		return store.Outcome{}, s.err
+	}
+	if s.outcome.Replayed {
+		return s.outcome, nil
+	}
+
+	s.savedBatch = notifications
+	s.rendered = renderResponse()
+
+	return store.Outcome{}, nil
 }
 
 // newNotificationRouter, bildirim ucu kurulmuş bir router döner.
-func newNotificationRouter(store NotificationStore) http.Handler {
-	return NewRouter(Dependencies{Logger: discardLogger(), Notifications: store})
+func newNotificationRouter(notifications NotificationStore) http.Handler {
+	return newRouterWithLimits(notifications, testSingleLimit, testBatchLimit)
+}
+
+// newRouterWithLimits, gövde sınırları özelleştirilmiş bir router döner.
+// Sınır testleri bunu kullanır: tek bir öğeyle doldurulabilecek kadar küçük bir
+// batch sınırı gerekir, yoksa domain'in içerik sınırı önce devreye girer.
+func newRouterWithLimits(
+	notifications NotificationStore, single, batch int64,
+) http.Handler {
+	return NewRouter(Dependencies{
+		Logger:          discardLogger(),
+		Notifications:   notifications,
+		BodyLimitSingle: single,
+		BodyLimitBatch:  batch,
+		IdempotencyTTL:  24 * time.Hour,
+	})
 }
 
 // postJSON, verilen gövdeyi JSON olarak POST eder.
@@ -350,17 +414,49 @@ func TestCreateNotificationStoreFailure(t *testing.T) {
 	require.NotContains(t, recorder.Body.String(), "10.0.0.5")
 }
 
-// TestCreateNotificationRejectsOversizedBody, gövde sınırının uygulandığını doğrular.
-func TestCreateNotificationRejectsOversizedBody(t *testing.T) {
+// singleBodyOfSize, tam olarak verilen bayt uzunluğunda geçerli bir tekil istek gövdesi üretir.
+func singleBodyOfSize(t *testing.T, size int) string {
+	t.Helper()
+
+	const template = `{"channel":"email","recipient":"ali@example.com","content":"%s"}`
+
+	padding := size - len(fmt.Sprintf(template, ""))
+	require.Positive(t, padding, "şablon zaten istenen boyutu aşıyor")
+
+	body := fmt.Sprintf(template, strings.Repeat("a", padding))
+	require.Len(t, body, size)
+
+	return body
+}
+
+// TestSingleBodyLimitBoundary, tekil ucun gövde sınırını sınırın iki yanında doğrular.
+func TestSingleBodyLimitBoundary(t *testing.T) {
 	t.Parallel()
 
-	oversized := `{"channel":"email","recipient":"ali@example.com","content":"` +
-		strings.Repeat("a", maxBodyBytes+1) + `"}`
+	t.Run("sınırın tam üstünde kabul", func(t *testing.T) {
+		t.Parallel()
 
-	recorder := postJSON(t, newNotificationRouter(&stubNotificationStore{}), oversized)
+		recorder := postJSON(t, newNotificationRouter(&stubNotificationStore{}),
+			singleBodyOfSize(t, testSingleLimit))
 
-	require.Equal(t, http.StatusRequestEntityTooLarge, recorder.Code)
-	require.Equal(t, CodePayloadTooLarge, decodeError(t, recorder).Error)
+		require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+	})
+
+	t.Run("bir bayt fazlası 413", func(t *testing.T) {
+		t.Parallel()
+
+		recorder := postJSON(t, newNotificationRouter(&stubNotificationStore{}),
+			singleBodyOfSize(t, testSingleLimit+1))
+
+		require.Equal(t, http.StatusRequestEntityTooLarge, recorder.Code)
+
+		body := decodeError(t, recorder)
+		require.Equal(t, CodePayloadTooLarge, body.Error)
+		// Mesaj sınırı söylemeli ki istemci neyi aştığını bilsin.
+		require.Contains(t, body.Message, fmt.Sprint(testSingleLimit))
+		// Tekil uçta "batch'i bölün" öğüdü anlamsız olurdu.
+		require.NotContains(t, body.Message, "bölün")
+	})
 }
 
 // TestNotFoundAndMethodNotAllowedUseErrorEnvelope, chi'nin varsayılan düz metin

@@ -214,13 +214,23 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         büyük `Ç` (0x09) ve `ö ü Ö Ü` **var** → aynı metnin büyük/küçük hâli farklı sınıra tabi
   - [x] Unicode sınırı rune değil **UTF-16 kod birimi** (emoji vekil çift = 2 birim)
   - [x] API sözleşmesi sabitlendi: hata zarfı + `ErrorCode` enum'u + DTO (iç alanlar gizli)
-- [ ] **Adım 4 — Batch + idempotency** → `feat: add batch creation and idempotency`
+- [x] **Adım 4 — Batch + idempotency** → `feat: add batch creation and idempotency`
+  - [x] `request_hash` = **ham gövde baytlarının** SHA-256'sı; gövde bir kez okunup hem
+        hash hem JSON çözme aynı baytlardan yapılır
+  - [x] Anahtar **işten önce** talep edilir (claim-first): 1000 satır yazıp çöpe atmak yok
+  - [x] Doğruluk TTL temizliğine bağlı değil: süresi dolmuş anahtar aynı transaction'da
+        devralınır (`ON CONFLICT ... DO UPDATE ... WHERE süresi dolmuş`)
+  - [x] Batch yazımı `pgx.CopyFrom`; zaman kolonları DB varsayılanına bırakıldı
+  - [x] Uç başına gövde sınırı (`BODY_LIMIT_SINGLE` / `BODY_LIMIT_BATCH`)
 - [ ] **Adım 5 — Okuma + iptal:** get, batch özeti, cursor listeleme, atomik iptal → `feat: add query, listing and cancellation endpoints`
 
 **Gün sonu kontrolü:** `docker compose up` çalışıyor; curl ile oluştur / listele / iptal et.
 
 ### 2. Gün — İşleme motoru
 - [ ] **Adım 6 — Worker motoru:** kanal havuzları, SKIP LOCKED claim (20'li), lease + token, reaper, provider client, mock provider, graceful shutdown → `feat: implement worker engine with leases and recovery`
+  - [ ] Idempotency TTL temizliğini reaper'ın yanına ekle:
+        `store.DeleteExpiredIdempotencyKeys` Adım 4'te yazıldı ve test edildi,
+        yalnızca periyodik çağıran eksik (API değil worker koşturmalı)
 - [ ] **Adım 7 — Rate limit + öncelik:** Redis jeton kovası, `--scale worker=3` demosu → `feat: add distributed rate limiting and priority ordering`
 - [ ] **Adım 8 — Retry + hata yönetimi:** sınıflandırma, backoff + jitter, attempts tablosu, circuit breaker → `feat: implement retry policy and circuit breaker`
 - [ ] **Adım 9 — Gözlemlenebilirlik:** `/metrics`, uçtan uca correlation ID, `/health/ready` → `feat: add metrics, structured logging and health checks`
@@ -240,6 +250,11 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         bir cümleyle açıkla
   - [ ] README'de SMS uzunluk kuralını (GSM-7 160 / Unicode 70) ve Türkçe karakterin
         maliyet etkisini belgele
+  - [ ] README'de idempotency hash tercihi: "Semantik olarak aynı ama byte olarak farklı
+        istekler 409 alır; tekrar denemeler aynı baytları gönderdiği için bu bilinçli ve
+        güvenli bir tercihtir."
+  - [ ] README'de batch sınırları: "1000 kayıt ve 16 MB sınırı birlikte uygulanır;
+        Türkçe/emoji içerikli çok uzun e-posta batch'leri byte sınırına önce takılabilir."
 - [ ] **Son prova:** sıfırdan klon + demo senaryosu
 - [ ] **Mülakat provası**
 - [ ] *(Zaman kalırsa)* **Tracing:** OpenTelemetry + Jaeger

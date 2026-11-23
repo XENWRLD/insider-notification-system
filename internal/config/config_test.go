@@ -68,3 +68,53 @@ func TestLoadReadsOverrides(t *testing.T) {
 	require.Equal(t, "9090", cfg.HTTPPort)
 	require.Equal(t, 30*time.Second, cfg.ShutdownTimeout)
 }
+
+func TestLoadRequestLimitDefaults(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.EqualValues(t, 128<<10, cfg.BodyLimitSingle, "tekil uç varsayılanı 128 KiB olmalı")
+	require.EqualValues(t, 16<<20, cfg.BodyLimitBatch, "batch varsayılanı 16 MiB olmalı")
+	require.Equal(t, 24*time.Hour, cfg.IdempotencyTTL)
+}
+
+func TestLoadReadsRequestLimitOverrides(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("BODY_LIMIT_SINGLE", "4096")
+	t.Setenv("BODY_LIMIT_BATCH", "1048576")
+	t.Setenv("IDEMPOTENCY_TTL", "1h")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.EqualValues(t, 4096, cfg.BodyLimitSingle)
+	require.EqualValues(t, 1048576, cfg.BodyLimitBatch)
+	require.Equal(t, time.Hour, cfg.IdempotencyTTL)
+}
+
+func TestLoadRejectsInvalidRequestLimits(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "sayı değil", key: "BODY_LIMIT_SINGLE", value: "128KB"},
+		{name: "sıfır", key: "BODY_LIMIT_SINGLE", value: "0"},
+		{name: "negatif", key: "BODY_LIMIT_BATCH", value: "-1"},
+		{name: "geçersiz süre", key: "IDEMPOTENCY_TTL", value: "bir gün"},
+		{name: "negatif süre", key: "IDEMPOTENCY_TTL", value: "-1h"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(test.key, test.value)
+
+			_, err := Load()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), test.key)
+		})
+	}
+}

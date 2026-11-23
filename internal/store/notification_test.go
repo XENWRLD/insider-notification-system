@@ -34,6 +34,19 @@ func newTestNotification(t *testing.T, channel, priority string) *domain.Notific
 	return notification
 }
 
+// noIdem, idempotency koruması olmayan bir istek (bu dosyadaki testler korumayı
+// ayrıca test etmiyor; onlar idempotency_test.go'da).
+var noIdem = IdempotencyRequest{Scope: ScopeNotifications, TTL: testTTL}
+
+// createPlain, bildirimi koruma olmadan yazar.
+func createPlain(t *testing.T, store *Store, ctx context.Context, n *domain.Notification) error {
+	t.Helper()
+
+	_, err := store.CreateNotification(ctx, n, noIdem, func() any { return nil })
+
+	return err
+}
+
 // TestCreateNotificationPersistsAllFields, yazılan satırın tamamını geri okur.
 //
 // Amaç yalnızca "hata dönmedi" demek değil: kolonların doğru sıraya bağlandığını
@@ -47,7 +60,7 @@ func TestCreateNotificationPersistsAllFields(t *testing.T) {
 	notification := newTestNotification(t, "sms", "high")
 
 	before := time.Now().UTC()
-	require.NoError(t, store.CreateNotification(ctx, notification))
+	require.NoError(t, createPlain(t, store, ctx, notification))
 
 	// RETURNING ile zaman damgaları veritabanından dolduruldu.
 	require.False(t, notification.CreatedAt.IsZero(), "created_at doldurulmalıydı")
@@ -106,7 +119,7 @@ func TestCreateNotificationAllChannels(t *testing.T) {
 
 	for _, channel := range []string{"sms", "email", "push"} {
 		notification := newTestNotification(t, channel, "")
-		require.NoError(t, store.CreateNotification(ctx, notification))
+		require.NoError(t, createPlain(t, store, ctx, notification))
 	}
 
 	var count int
@@ -128,7 +141,7 @@ func TestCreateNotificationIsImmediatelyClaimable(t *testing.T) {
 
 	// Öncelikler karışık sırada yazılıyor; claim sorgusu high'ı önce getirmeli.
 	for _, priority := range []string{"low", "normal", "high"} {
-		require.NoError(t, store.CreateNotification(ctx, newTestNotification(t, "sms", priority)))
+		require.NoError(t, createPlain(t, store, ctx, newTestNotification(t, "sms", priority)))
 	}
 
 	// Adım 6'daki claim sorgusunun şekli (henüz kilit alınmıyor).
@@ -161,9 +174,9 @@ func TestCreateNotificationRejectsDuplicateID(t *testing.T) {
 	ctx := context.Background()
 	notification := newTestNotification(t, "sms", "normal")
 
-	require.NoError(t, store.CreateNotification(ctx, notification))
+	require.NoError(t, createPlain(t, store, ctx, notification))
 
-	err := store.CreateNotification(ctx, notification)
+	err := createPlain(t, store, ctx, notification)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "bildirim eklenemedi")
 }
@@ -177,6 +190,6 @@ func TestCreateNotificationHonoursContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := store.CreateNotification(ctx, newTestNotification(t, "sms", "normal"))
+	err := createPlain(t, store, ctx, newTestNotification(t, "sms", "normal"))
 	require.ErrorIs(t, err, context.Canceled)
 }

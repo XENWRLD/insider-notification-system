@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,28 +11,59 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
+	"github.com/XENWRLD/insider-notification-system/internal/store"
 )
 
-// createTimeout, bildirim yazma işlemine tanınan süre.
-// http.Server'ın WriteTimeout'undan kısa tutulur: sorgu takılırsa istemci bağlantı
-// resetlenmesi yerine düzgün bir 500 alır.
-const createTimeout = 5 * time.Second
+const (
+	// createTimeout, bildirim yazma işlemine tanınan süre.
+	// http.Server'ın WriteTimeout'undan kısa tutulur: sorgu takılırsa istemci bağlantı
+	// resetlenmesi yerine düzgün bir 500 alır.
+	createTimeout = 5 * time.Second
+
+	// batchTimeout, 1000 satırlık toplu yazıma tanınan süre. Tekil yazımdan uzun:
+	// CopyFrom hızlı ama 1000 satır yine de daha fazla iş.
+	batchTimeout = 30 * time.Second
+
+	// IdempotencyKeyHeader, istemcinin tekrar gönderim koruması için verdiği anahtar.
+	IdempotencyKeyHeader = "Idempotency-Key"
+
+	// IdempotentReplayHeader, yanıtın saklanan bir cevap olduğunu bildirir.
+	// İstemci "isteğim yeni mi işlendi, yoksa tekrar mı" sorusunu buradan anlar.
+	IdempotentReplayHeader = "Idempotent-Replay"
+
+	// idempotencyKeyMaxLen, anahtar uzunluk sınırı. Sınırsız bırakmak tabloyu
+	// istemcinin keyfine bırakırdı.
+	idempotencyKeyMaxLen = 255
+)
 
 // NotificationStore, handler'ın ihtiyaç duyduğu veri erişimi.
 //
 // Arayüz olarak alınması (Pinger ile aynı felsefe) handler'ın gerçek veritabanı
 // olmadan test edilebilmesini sağlar; httpapi paketi pgx import etmez.
 type NotificationStore interface {
-	CreateNotification(ctx context.Context, n *domain.Notification) error
+	CreateNotification(
+		ctx context.Context, n *domain.Notification,
+		idem store.IdempotencyRequest, renderResponse func() any,
+	) (store.Outcome, error)
+
+	CreateBatch(
+		ctx context.Context, notifications []*domain.Notification,
+		idem store.IdempotencyRequest, renderResponse func() any,
+	) (store.Outcome, error)
 }
 
 // notificationHandler, bildirim uçlarını sunar.
 type notificationHandler struct {
 	logger *slog.Logger
 	store  NotificationStore
+
+	singleLimit bodyLimit
+	batchLimit  bodyLimit
+
+	idempotencyTTL time.Duration
 }
 
-// createNotificationRequest, POST /api/v1/notifications gövdesi.
+// createNotificationRequest, tekil oluşturma gövdesi ve batch öğelerinin biçimi.
 //
 // priority isteğe bağlı; verilmezse domain katmanı "normal" uygular.
 type createNotificationRequest struct {
@@ -39,6 +71,16 @@ type createNotificationRequest struct {
 	Recipient string `json:"recipient"`
 	Content   string `json:"content"`
 	Priority  string `json:"priority"`
+}
+
+// toDomainInput, HTTP biçimini domain girdisine çevirir.
+func (r createNotificationRequest) toDomainInput() domain.NewNotificationInput {
+	return domain.NewNotificationInput{
+		Channel:   r.Channel,
+		Recipient: r.Recipient,
+		Content:   r.Content,
+		Priority:  r.Priority,
+	}
 }
 
 // notificationResponse, bir bildirimin dışa verilen biçimi.
@@ -94,26 +136,99 @@ func newNotificationResponse(n *domain.Notification) notificationResponse {
 	}
 }
 
+// idempotencyFor, istekten koruma parametrelerini çıkarır.
+//
+// Hash HAM GÖVDE baytlarından hesaplanır: istemci aynı isteği tekrar gönderdiğinde aynı
+// baytları gönderir. Semantik olarak aynı ama baytı farklı istekler (fazladan boşluk,
+// farklı alan sırası) bilinçli olarak 409 alır — "aynı istek"in tanımı sunucunun JSON
+// yorumuna bırakılmaz.
+func (h notificationHandler) idempotencyFor(
+	r *http.Request, scope string, body []byte,
+) (store.IdempotencyRequest, bool) {
+	key := r.Header.Get(IdempotencyKeyHeader)
+	if key == "" {
+		return store.IdempotencyRequest{Scope: scope, TTL: h.idempotencyTTL}, true
+	}
+
+	if len(key) > idempotencyKeyMaxLen {
+		return store.IdempotencyRequest{}, false
+	}
+
+	sum := sha256.Sum256(body)
+
+	return store.IdempotencyRequest{
+		Scope: scope,
+		Key:   key,
+		Hash:  sum[:],
+		TTL:   h.idempotencyTTL,
+	}, true
+}
+
+// writeStoreOutcome, store'dan dönen hatayı veya saklanan cevabı yazar.
+// İş gerçekten yapıldıysa (replay değil) false döner ve çağıran kendi yanıtını yazar.
+func (h notificationHandler) writeStoreOutcome(
+	w http.ResponseWriter, r *http.Request, outcome store.Outcome, err error, operation string,
+) bool {
+	if errors.Is(err, store.ErrIdempotencyKeyReused) {
+		writeError(w, r, http.StatusConflict, CodeConflict,
+			"bu Idempotency-Key farklı bir istek gövdesiyle kullanılmış")
+
+		return true
+	}
+
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), operation+" başarısız",
+			slog.String("correlation_id", CorrelationID(r.Context())),
+			slog.String("error", err.Error()),
+		)
+		// İç hata istemciye sızmaz: yalnızca kod ve correlation_id döner, ayrıntı log'da.
+		writeError(w, r, http.StatusInternalServerError, CodeInternalError,
+			"istek kaydedilemedi")
+
+		return true
+	}
+
+	if outcome.Replayed {
+		h.logger.InfoContext(r.Context(), "idempotent tekrar gönderim",
+			slog.String("correlation_id", CorrelationID(r.Context())),
+			slog.String("operation", operation),
+		)
+
+		w.Header().Set(IdempotentReplayHeader, "true")
+		// Saklanan gövde birebir yazılır; yeniden serialize edilmez.
+		writeStoredJSON(w, outcome.Status, outcome.Body)
+
+		return true
+	}
+
+	return false
+}
+
 // create, tekil bildirim oluşturur.
 //
 // 202 döner, 201 değil: kayıt oluştu ama gönderim henüz yapılmadı. Asıl gönderimi
 // worker yapacak, bu yüzden "kabul edildi" semantiği doğru olan.
 func (h notificationHandler) create(w http.ResponseWriter, r *http.Request) {
 	var request createNotificationRequest
-	if !decodeJSON(w, r, &request) {
+
+	body, ok := decodeJSON(w, r, h.singleLimit, &request)
+	if !ok {
 		return
 	}
 
-	notification, err := domain.NewNotification(domain.NewNotificationInput{
-		Channel:   request.Channel,
-		Recipient: request.Recipient,
-		Content:   request.Content,
-		Priority:  request.Priority,
-	})
+	idem, ok := h.idempotencyFor(r, store.ScopeNotifications, body)
+	if !ok {
+		writeError(w, r, http.StatusBadRequest, CodeValidationFailed,
+			"Idempotency-Key en fazla 255 karakter olabilir")
+
+		return
+	}
+
+	notification, err := domain.NewNotification(request.toDomainInput())
 
 	var verr *domain.ValidationError
 	if errors.As(err, &verr) {
-		// Tekil uçta önek yok; batch ucunda "notifications[i]." verilecek.
+		// Tekil uçta önek yok; batch ucunda "notifications[i]." uygulanır.
 		writeValidationError(w, r, "", verr)
 
 		return
@@ -138,16 +253,12 @@ func (h notificationHandler) create(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), createTimeout)
 	defer cancel()
 
-	if err := h.store.CreateNotification(ctx, notification); err != nil {
-		h.logger.ErrorContext(ctx, "bildirim kaydedilemedi",
-			slog.String("correlation_id", notification.CorrelationID),
-			slog.String("channel", string(notification.Channel)),
-			slog.String("error", err.Error()),
-		)
-		// İç hata istemciye sızmaz: yalnızca kod ve correlation_id döner, ayrıntı log'da.
-		writeError(w, r, http.StatusInternalServerError, CodeInternalError,
-			"bildirim kaydedilemedi")
+	// renderResponse iş tamamlandıktan SONRA çağrılır: zaman damgaları o an dolu olur,
+	// böylece saklanan cevap istemciye dönenle birebir aynı olur.
+	render := func() any { return newNotificationResponse(notification) }
 
+	outcome, err := h.store.CreateNotification(ctx, notification, idem, render)
+	if h.writeStoreOutcome(w, r, outcome, err, "bildirim oluşturma") {
 		return
 	}
 

@@ -12,9 +12,10 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 - **Tamamlanan:** Adım 0 (ortam), Adım 1 (iskelet: config, slog, chi router, correlation ID,
   `/health/live`, `/health/ready`, Dockerfile, compose = postgres 18 + redis 8 + api),
   Adım 2 (şema: 3 migration, 4 index, `migrate` servisi, testcontainers testleri),
-  Adım 3 (domain + store + `POST /api/v1/notifications`, API sözleşmesi)
-- **Sıradaki:** Adım 4 — batch (`POST /api/v1/notifications/batch`, 1–1000, tek transaction)
-  ve idempotency (`Idempotency-Key`; aynı key+payload → eski cevap, farklı payload → 409)
+  Adım 3 (domain + store + `POST /api/v1/notifications`, API sözleşmesi),
+  Adım 4 (batch + idempotency: CopyFrom, claim-first transaction, uç başına gövde sınırı)
+- **Sıradaki:** Adım 5 — okuma ve iptal: `GET /notifications/{id}` (deneme geçmişiyle),
+  `GET /batches/{id}` özeti, cursor pagination'lı listeleme, atomik iptal (`409` if başladı)
 - **Henüz boş** (`.gitkeep`): `internal/{worker,provider,ratelimit}`, `cmd/worker`,
   `cmd/mockprovider`, `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
@@ -52,6 +53,31 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   70 **UTF-16 kod birimi** (emoji = 2 birim). Küçük `ç` ve `ş ğ ı İ` tabloda yok;
   büyük `Ç` ve `ö ü Ö Ü` var.
 - **Validation domain'de**, veritabanı CHECK kısıtları ikinci savunma hattı.
+
+### Idempotency ve batch (Adım 4'te sabitlendi)
+
+- **`Idempotency-Key`** isteğe bağlı, en fazla 255 karakter. Verilmezse koruma kapalı.
+- **`request_hash` = ham gövde baytlarının SHA-256'sı.** Gövde bir kez okunur
+  (`decodeJSON` baytları da döner); hash ve JSON çözme aynı baytlardan yapılır.
+  Sonuç: fazladan boşluk veya farklı alan sırası **409** alır — bilinçli katılık,
+  gerçek tekrar denemeleri aynı baytları gönderir.
+- **Tekrar gönderim** `202` + `Idempotent-Replay: true` + saklanan gövde döner.
+  Gövde `jsonb`'den geldiği için anahtar sırası normalize olur: değer olarak aynı,
+  **bayt olarak farklı** olabilir (JSON'da anahtar sırası anlamsız).
+- **Anahtar işten ÖNCE talep edilir** (claim-first): 1000 satır yazıp tekrar gönderim
+  fark edildiğinde çöpe atmak yerine erken çıkılır. Yer tutucu cevap aynı transaction'da
+  güncellenir, rollback hâlinde satır kalmaz.
+- **Süresi dolmuş anahtar** aynı transaction'da devralınır; doğruluk TTL temizliğine
+  **bağlı değil**. Temizlik (`store.DeleteExpiredIdempotencyKeys`, `LIMIT`'li) Adım 6'da
+  worker'da çağrılacak.
+- **Batch**: 1–1000 öğe, tek transaction, `pgx.CopyFrom`. `available_at`/`created_at`/
+  `updated_at` COPY listesinde **yok** → DB varsayılanı (tek saat kaynağı DB).
+- **Batch hep ya hiç**: bir öğe geçersizse hiçbiri yazılmaz; hatalı satırların **tümü**
+  tek yanıtta, `notifications[3].recipient` biçiminde anahtarlarla döner.
+- **Batch yanıtı özet**: `batch_id`, `accepted_count`, `notification_ids`,
+  `correlation_id`. `Location` header'ı **yok** (`/batches/{id}` ucu Adım 5'te geliyor).
+- **Gövde sınırı uç başına**: `BODY_LIMIT_SINGLE` (128 KiB) / `BODY_LIMIT_BATCH` (16 MiB).
+  Batch'in 413 mesajı sınırı ve "batch'i bölün" öğüdünü içerir.
 
 ## Modül ve klasörler
 

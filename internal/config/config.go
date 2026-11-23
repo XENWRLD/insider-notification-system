@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +29,17 @@ type Config struct {
 	ProviderURL string
 	// ShutdownTimeout, graceful shutdown için tanınan en uzun süre.
 	ShutdownTimeout time.Duration
+
+	// BodyLimitSingle, tekil oluşturma ucunun kabul ettiği en büyük gövde (bayt).
+	// İçerik sınırı 10.000 karakter olduğu için ~40 KB yeterli; 128 KiB rahat üst sınır.
+	BodyLimitSingle int64
+	// BodyLimitBatch, batch ucunun kabul ettiği en büyük gövde (bayt).
+	// 1000 e-posta × 10.000 karakter en kötü durumda ~10 MB tutar.
+	BodyLimitBatch int64
+
+	// IdempotencyTTL, saklanan idempotency cevaplarının geçerlilik süresi.
+	// Süresi dolmuş bir anahtar yeniden kullanılabilir hâle gelir.
+	IdempotencyTTL time.Duration
 }
 
 // Load, ortam değişkenlerini okur ve doğrular.
@@ -65,6 +77,24 @@ func Load() (Config, error) {
 	}
 	cfg.ShutdownTimeout = shutdownTimeout
 
+	idempotencyTTL, err := envDuration("IDEMPOTENCY_TTL", 24*time.Hour)
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	cfg.IdempotencyTTL = idempotencyTTL
+
+	bodyLimitSingle, err := envBytes("BODY_LIMIT_SINGLE", 128<<10)
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	cfg.BodyLimitSingle = bodyLimitSingle
+
+	bodyLimitBatch, err := envBytes("BODY_LIMIT_BATCH", 16<<20)
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	cfg.BodyLimitBatch = bodyLimitBatch
+
 	if !isKnownLogLevel(cfg.LogLevel) {
 		problems = append(problems, "LOG_LEVEL geçersiz (debug|info|warn|error): "+cfg.LogLevel)
 	}
@@ -94,6 +124,27 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 	parsed, err := time.ParseDuration(raw)
 	if err != nil {
 		return fallback, fmt.Errorf("%s süre olarak okunamadı (örn. 15s): %q", key, raw)
+	}
+	if parsed <= 0 {
+		return fallback, fmt.Errorf("%s pozitif olmalı: %q", key, raw)
+	}
+
+	return parsed, nil
+}
+
+// envBytes, bayt cinsinden bir boyut değişkenini okur.
+//
+// Sade tamsayı kabul edilir ("16777216"); kısaltma (16MB) desteklenmez çünkü MB/MiB
+// ayrımı belirsizlik yaratıyor. .env.example'da değerin yanına yorum düşülüyor.
+func envBytes(key string, fallback int64) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return fallback, fmt.Errorf("%s bayt sayısı olarak okunamadı (örn. 131072): %q", key, raw)
 	}
 	if parsed <= 0 {
 		return fallback, fmt.Errorf("%s pozitif olmalı: %q", key, raw)

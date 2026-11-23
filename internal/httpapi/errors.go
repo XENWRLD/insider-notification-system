@@ -1,20 +1,17 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 )
-
-// maxBodyBytes, kabul edilen en büyük istek gövdesi.
-//
-// İçerik sınırı 10.000 karakter; UTF-8'de karakter başına 4 bayta kadar çıkabildiği
-// için ~40 KB yeterli, 128 KB rahat bir üst sınır. Sınır olmazsa tek bir istemci
-// belleği tüketebilirdi.
-const maxBodyBytes = 128 << 10
 
 // ErrorCode, API'nin döndüğü makine okunur hata kodu.
 //
@@ -59,19 +56,49 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code ErrorCo
 	})
 }
 
-// writeValidationError, alan bazlı doğrulama hatalarını tek yanıtta yazar.
+// validationFields, alan hatalarını önek uygulayarak haritaya çevirir.
 //
 // fieldPrefix batch uçları için: "notifications[3]." öneki verildiğinde anahtar
 // "notifications[3].recipient" olur ve istemci hangi satırın hangi alanının bozuk
 // olduğunu doğrudan görür. Tekil uçlarda boş geçilir.
+func validationFields(
+	fieldPrefix string, verr *domain.ValidationError, into map[string]string,
+) map[string]string {
+	if into == nil {
+		into = make(map[string]string, len(verr.Fields))
+	}
+
+	for _, field := range verr.Fields {
+		into[fieldPrefix+field.Field] = field.Message
+	}
+
+	return into
+}
+
+// writeValidationError, alan bazlı doğrulama hatalarını tek yanıtta yazar.
 func writeValidationError(
 	w http.ResponseWriter, r *http.Request, fieldPrefix string, verr *domain.ValidationError,
 ) {
-	fields := make(map[string]string, len(verr.Fields))
-	for _, field := range verr.Fields {
-		fields[fieldPrefix+field.Field] = field.Message
+	writeFieldErrors(w, r, validationFields(fieldPrefix, verr, nil))
+}
+
+// writeBatchValidationError, batch içindeki tüm hatalı öğeleri tek yanıtta yazar.
+//
+// Anahtar biçimi "notifications[3].recipient": istemci 1000 öğeli bir batch'te hangi
+// satırın hangi alanının bozuk olduğunu doğrudan görür ve tek tek denemek zorunda kalmaz.
+func writeBatchValidationError(
+	w http.ResponseWriter, r *http.Request, berr *domain.BatchValidationError,
+) {
+	fields := make(map[string]string)
+	for index, itemError := range berr.Items {
+		fields = validationFields(fmt.Sprintf("notifications[%d].", index), itemError, fields)
 	}
 
+	writeFieldErrors(w, r, fields)
+}
+
+// writeFieldErrors, alan hatası haritasını 400 olarak yazar.
+func writeFieldErrors(w http.ResponseWriter, r *http.Request, fields map[string]string) {
 	writeJSON(w, http.StatusBadRequest, errorResponse{
 		Error:         CodeValidationFailed,
 		Message:       "istek doğrulanamadı",
@@ -80,39 +107,62 @@ func writeValidationError(
 	})
 }
 
-// decodeJSON, istek gövdesini çözer. Hata durumunda uygun yanıtı yazar ve false döner.
+// bodyLimit, bir ucun kabul ettiği gövde boyutu ve sınır aşıldığında verilecek öğüt.
 //
-// Üç korumayı birlikte uygular: Content-Type kontrolü, gövde boyutu sınırı ve
-// bilinmeyen alanların reddi.
-func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+// advice uca göre değişir: batch'te "batch'i bölün" demek işe yarar, tekil uçta anlamsız.
+type bodyLimit struct {
+	bytes  int64
+	advice string
+}
+
+// decodeJSON, istek gövdesini okur ve çözer; HAM BAYTLARI da döner.
+//
+// Gövde bir kez okunup tamponlanıyor çünkü aynı baytlar iki işe yarıyor: idempotency
+// hash'i ve JSON çözümlemesi. Akış (streaming) kullansaydık hash için gövdeyi ikinci kez
+// okumak gerekirdi ve bu mümkün değil.
+//
+// Dört korumayı birlikte uygular: Content-Type kontrolü, gövde boyutu sınırı,
+// bilinmeyen alanların reddi ve ikinci JSON değerinin reddi.
+func decodeJSON(
+	w http.ResponseWriter, r *http.Request, limit bodyLimit, target any,
+) ([]byte, bool) {
 	if !hasJSONContentType(r) {
 		writeError(w, r, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType,
 			"Content-Type application/json olmalı")
 
-		return false
+		return nil, false
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit.bytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			message := fmt.Sprintf("istek gövdesi çok büyük (sınır %d bayt)", limit.bytes)
+			if limit.advice != "" {
+				message += "; " + limit.advice
+			}
 
-	decoder := json.NewDecoder(r.Body)
+			writeError(w, r, http.StatusRequestEntityTooLarge, CodePayloadTooLarge, message)
+
+			return nil, false
+		}
+
+		writeError(w, r, http.StatusBadRequest, CodeInvalidJSON, "istek gövdesi okunamadı")
+
+		return nil, false
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	// Bilinmeyen alan hata verir: "prioritiy" gibi bir yazım hatası sessizce
 	// yutulup varsayılanla devam etmek, istemcinin fark etmediği bir bug olurdu.
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(target); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, r, http.StatusRequestEntityTooLarge, CodePayloadTooLarge,
-				"istek gövdesi çok büyük")
-
-			return false
-		}
-
 		// Çözümleme hatasının metni istemciye verilir: hangi alanın bozuk olduğunu
 		// söylüyor ve hassas bilgi içermiyor.
 		writeError(w, r, http.StatusBadRequest, CodeInvalidJSON, err.Error())
 
-		return false
+		return nil, false
 	}
 
 	// Gövdede ikinci bir JSON değeri olmamalı; sessizce yok saymak yerine reddediyoruz.
@@ -120,10 +170,26 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		writeError(w, r, http.StatusBadRequest, CodeInvalidJSON,
 			"gövde tek bir JSON nesnesi olmalı")
 
-		return false
+		return nil, false
 	}
 
-	return true
+	return body, true
+}
+
+// writeStoredJSON, saklanan bir cevabı Go tarafında yeniden serialize etmeden yazar.
+//
+// Not: gövde veritabanında jsonb olarak saklandığı için anahtar sırası ve boşluklar
+// PostgreSQL tarafından normalize edilir — tekrar gönderimde dönen gövde ilk cevapla
+// DEĞER olarak aynı, bayt olarak farklı olabilir. JSON'da anahtar sırası anlamsız
+// (RFC 8259) olduğu için bu kabul edilebilir; karşılığında jsonb bize geçersiz JSON
+// saklanamaması ve cevap üzerinde sorgu yapılabilmesini veriyor.
+func writeStoredJSON(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+
+	if _, err := w.Write(body); err != nil {
+		slog.Error("saklanan JSON yanıt yazılamadı", slog.String("error", err.Error()))
+	}
 }
 
 // hasJSONContentType, isteğin JSON gövdesi taşıdığını bildirip bildirmediğini söyler.
