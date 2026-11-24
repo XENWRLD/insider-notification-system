@@ -20,12 +20,31 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   `cmd/worker`; dört commit),
   Adım 7 (dağıtık rate limit: `internal/ratelimit` GCRA kovası, izin sender'da,
   fail closed, starvation belgelendi; üç commit)
-- **Sıradaki:** Adım 8 — retry + hata yönetimi: sınıflandırma (400/422 → failed,
-  429 → `provider.StatusError.RetryAfter`, 5xx/timeout → exponential backoff + jitter),
-  circuit breaker. **Yalnızca `internal/worker/classify.go` gövdesi değişecek** —
-  Adım 6'da bırakılan dikiş. PLAN §8'de Adım 8'e yazılan açık soru: claim sorgusu
-  iptal edilebilir ctx ile çalışıyor, kapanış tam claim sırasında gelirse satırlar
-  reaper'a kadar (~60 sn) bekler
+- **Devam eden: Adım 8** — retry politikası + kanal başına circuit breaker.
+  Plan dört commit'e bölündü ve **1'i bitti**:
+  1. ✅ `feat: add per-channel circuit breaker` — `internal/breaker`
+     (`Breaker` arayüzü, `ErrOpen`, üç yollu `IsFailure`, `AlwaysClosed()`),
+     `sony/gobreaker/v2` sarmalayıcısı, 16 birim testi. Worker'a dokunmadı.
+  2. ⬜ `feat: add deferred lease hand-back to the store` — `store.DeferLeases`
+     (denemeyi saymadan, sebebiyle, istenirse ileri tarihli geri verme).
+  3. ⬜ `feat: implement retry policy and circuit breaker` — `classify.go` yeniden
+     yazımı (`decision`/`action`/`breakerOutcome`), `send.go`'da iki breaker kapısı,
+     `channel.go`'da claimer kapısı, `Config` alanları, `cmd/worker`, compose/env.
+  4. ⬜ `fix: shield the claim query from shutdown cancellation` — `claimCtx`
+     (`context.WithoutCancel` + `ClaimTimeout`), ardından PLAN kutucukları,
+     `CLAUDE.md` **Durum**, öğrenme notu `adim-08-retry-breaker.md`.
+
+  **Onaylı plan:** `C:\Users\Admin\.claude\plans\plan-md-yi-oku-polymorphic-cerf.md`
+  — beş tur gözden geçirmeden geçti ve dört gerçek açığı kapatıyor (zehirli mesaj
+  sonsuz döngüsü, tek mesajın kanalı kilitlemesi, yarı açıkta sıcak döngünün
+  paylaşılan Redis bütçesini tüketmesi, `ORDER BY priority_rank`'in erteleme
+  hesabını bozması). Kararların gerekçesi orada; plan okunmadan 2–4 arası
+  commit'lere girilmemeli.
+- **Düzeltme:** Adım 6'da yazılan "**yalnızca `classify.go` gövdesi değişecek**"
+  ifadesi **yanlış** (`classify.go:19-25` yorumunda da duruyor, Adım 8'in 3. commit'inde
+  düzeltilecek). Devre açıkken mesajların deneme hakkı ve rate limit izni harcamaması
+  için `channel.go`'daki claim döngüsünün de durması zorunlu — PLAN §2'nin
+  "açıkken o kanaldan iş çekilmez" ifadesi doğru olan.
 - **Henüz boş** (`.gitkeep`): `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
   `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`,
@@ -229,6 +248,7 @@ Modül yolu: `github.com/XENWRLD/insider-notification-system`
 | `internal/worker` | Havuzlar, claim, retry, reaper |
 | `internal/provider` | Dış sağlayıcı HTTP client'ı |
 | `internal/ratelimit` | Redis GCRA kovası: kanal başına global hız sınırı |
+| `internal/breaker` | Kanal başına devre kesici (sony/gobreaker sarmalayıcısı) |
 | `internal/observability` | Logger, metrikler |
 | `migrations` | golang-migrate dosyaları |
 
