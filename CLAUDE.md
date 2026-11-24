@@ -34,7 +34,7 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
      (`context.WithoutCancel` + `ClaimTimeout`), ardından PLAN kutucukları,
      `CLAUDE.md` **Durum**, öğrenme notu `adim-08-retry-breaker.md`.
 
-  **Onaylı plan:** `C:\Users\Admin\.claude\plans\plan-md-yi-oku-polymorphic-cerf.md`
+  **Onaylı plan:** `docs/plans/adim-08-plan.md`
   — beş tur gözden geçirmeden geçti ve dört gerçek açığı kapatıyor (zehirli mesaj
   sonsuz döngüsü, tek mesajın kanalı kilitlemesi, yarı açıkta sıcak döngünün
   paylaşılan Redis bütçesini tüketmesi, `ORDER BY priority_rank`'in erteleme
