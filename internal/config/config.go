@@ -153,6 +153,49 @@ func envBytes(key string, fallback int64) (int64, error) {
 	return parsed, nil
 }
 
+// envInt, sayma amaçlı bir tamsayı değişkenini okur (eşzamanlılık, parti boyutu).
+//
+// envBytes'ın aynısı ama int döner ve hata mesajı "bayt" demez: yanlış mesaj,
+// yanlış değişkeni aramaya yol açar.
+func envInt(key string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback, fmt.Errorf("%s tam sayı olarak okunamadı (örn. 20): %q", key, raw)
+	}
+	if parsed <= 0 {
+		return fallback, fmt.Errorf("%s pozitif olmalı: %q", key, raw)
+	}
+
+	return parsed, nil
+}
+
+// envFloat01, 0 ile 1 arasında bir oran okur (mock sağlayıcının hata oranları).
+//
+// Aralık kontrolü burada: 0.3 yerine 30 yazmak sessizce "her istek başarısız"
+// demek olurdu ve yük testinin sonucu yanıltıcı çıkardı. Sıfır geçerli bir değer
+// (hata üretme), bu yüzden envInt gibi pozitiflik şartı yok.
+func envFloat01(key string, fallback float64) (float64, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback, fmt.Errorf("%s oran olarak okunamadı (örn. 0.3): %q", key, raw)
+	}
+	if parsed < 0 || parsed > 1 {
+		return fallback, fmt.Errorf("%s 0 ile 1 arasında olmalı: %q", key, raw)
+	}
+
+	return parsed, nil
+}
+
 func isKnownLogLevel(level string) bool {
 	switch strings.ToLower(level) {
 	case "debug", "info", "warn", "error":

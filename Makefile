@@ -21,7 +21,7 @@ V ?=
 NAME ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help env up up-build down logs ps build run test test-unit test-race lint fmt tidy clean \
+.PHONY: help env up up-build down logs ps build run run-mock test test-unit test-race lint fmt tidy clean \
         migrate-up migrate-down migrate-version migrate-create migrate-force
 
 help: ## Komut listesini gösterir
@@ -50,6 +50,9 @@ build: ## Tum binary'leri bin/ altina derler
 
 run: env ## API'yi host'ta calistirir (postgres ve redis compose'da olmali)
 	$(GO) run ./cmd/api
+
+run-mock: ## Sahte saglayiciyi host'ta calistirir
+	$(GO) run ./cmd/mockprovider
 
 migrate-up: ## Bekleyen migration'lari uygular
 	$(MIGRATE) up
