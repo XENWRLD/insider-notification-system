@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
+	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
 )
 
 // TestNewDefaultsToAllChannels, kanal verilmediğinde üç kanalın da açıldığını doğrular.
@@ -24,42 +25,79 @@ func TestNewDefaultsToAllChannels(t *testing.T) {
 		engine.cfg.Channels)
 }
 
-// TestNewRejectsLeaseShorterThanSafeWindow, lease süresi gönderim penceresini
-// kapsamıyorsa worker'ın hiç açılmadığını doğrular.
+// TestNewRejectsLeaseShorterThanLeaseWindow, lease süresi satırın lease altında
+// geçirebileceği en kötü süreyi kapsamıyorsa worker'ın hiç açılmadığını doğrular.
 //
-// Kapsamazsa lease iş bitmeden dolar, reaper satırı devralır ve aynı mesaj ikinci kez
-// gider. Hata mesajı sayıları içeriyor: "lease çok kısa" demek kullanıcıya hangi
-// değeri değiştireceğini söylemez.
-func TestNewRejectsLeaseShorterThanSafeWindow(t *testing.T) {
+// Pencere ÜÇ terimli: izin beklemesi + sağlayıcı çağrısı + sonuç yazımı. Kapsamazsa
+// lease iş bitmeden dolar, reaper satırı devralır ve aynı mesaj ikinci kez gider.
+// Hata mesajı sayıları içeriyor: "lease çok kısa" demek kullanıcıya hangi değeri
+// değiştireceğini söylemez.
+func TestNewRejectsLeaseShorterThanLeaseWindow(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig()
+	cfg.RateWaitMax = 10 * time.Second
 	cfg.ProviderTimeout = 10 * time.Second
 	cfg.ResultTimeout = 3 * time.Second
-	cfg.LeaseDuration = 20 * time.Second // gereken: 2 × 13s = 26s
+	cfg.LeaseDuration = 40 * time.Second // gereken: 2 × 23s = 46s
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "LeaseDuration")
-	require.Contains(t, err.Error(), "26s")
-	require.Contains(t, err.Error(), "20s")
+	require.Contains(t, err.Error(), "46s", "gereken süre mesajda olmalı")
+	require.Contains(t, err.Error(), "RateWaitMax", "hangi terimlerin toplandığı yazmalı")
+	require.Contains(t, err.Error(), "40s")
 }
 
-// TestNewAcceptsLeaseAtExactSafeBoundary, tam sınırdaki değerin kabul edildiğini
-// doğrular (sınır kapsayıcı).
-func TestNewAcceptsLeaseAtExactSafeBoundary(t *testing.T) {
+// TestNewAcceptsLeaseAtExactLeaseWindowBoundary, tam sınırdaki değerin kabul
+// edildiğini doğrular (sınır kapsayıcı) ve üretim varsayılanlarının geçtiğini gösterir.
+func TestNewAcceptsLeaseAtExactLeaseWindowBoundary(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig()
+	cfg.RateWaitMax = 10 * time.Second
 	cfg.ProviderTimeout = 10 * time.Second
 	cfg.ResultTimeout = 3 * time.Second
-	cfg.LeaseDuration = 26 * time.Second
+	cfg.LeaseDuration = 46 * time.Second
 	cfg.DrainTimeout = 13 * time.Second
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, discardLogger())
-
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
 	require.NoError(t, err)
+
+	// Üretim varsayılanları: lease 60s, pencere 2 × 23s = 46s.
+	cfg.LeaseDuration = 60 * time.Second
+	cfg.DrainTimeout = 20 * time.Second
+
+	_, err = New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	require.NoError(t, err, "üretim varsayılanları eşitsizliği sağlamalı")
+}
+
+// TestNewRejectsMissingLimiter, hız sınırlayıcı olmadan motorun açılmadığını doğrular.
+//
+// Eksik limiter sessizce "limit yok" demek olurdu; sınırsız çalışmak isteyen test
+// ratelimit.Unlimited() geçiyor, yani seçim görünür kalıyor.
+func TestNewRejectsMissingLimiter(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(testConfig(), &stubQueue{}, &stubSender{}, nil, discardLogger())
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "hız sınırlayıcı")
+}
+
+// TestNewRejectsNonPositiveRateWaitMax, izin bekleme sınırının zorunlu olduğunu
+// doğrular: 0 olsaydı izin alamayan her satır anında kuyruğa geri dönerdi.
+func TestNewRejectsNonPositiveRateWaitMax(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.RateWaitMax = 0
+
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "RateWaitMax")
 }
 
 // TestNewRejectsDrainTimeoutShorterThanSendWindow, kapanış penceresinin uçan
@@ -77,7 +115,7 @@ func TestNewRejectsDrainTimeoutShorterThanSendWindow(t *testing.T) {
 	cfg.LeaseDuration = time.Minute
 	cfg.DrainTimeout = 5 * time.Second // gereken: 13s
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "DrainTimeout")
@@ -133,7 +171,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 			cfg := testConfig()
 			test.mutate(&cfg)
 
-			_, err := New(cfg, &stubQueue{}, &stubSender{}, discardLogger())
+			_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
 
 			require.Error(t, err)
 			require.Contains(t, err.Error(), test.wantStr)
@@ -151,7 +189,7 @@ func TestNewCollectsAllProblems(t *testing.T) {
 	cfg.ClaimBatchSize = 0
 	cfg.ReaperBatchSize = 0
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Concurrency")
@@ -164,10 +202,10 @@ func TestNewCollectsAllProblems(t *testing.T) {
 func TestNewRejectsMissingDependencies(t *testing.T) {
 	t.Parallel()
 
-	_, err := New(testConfig(), nil, &stubSender{}, discardLogger())
+	_, err := New(testConfig(), nil, &stubSender{}, ratelimit.Unlimited(), discardLogger())
 	require.Error(t, err)
 
-	_, err = New(testConfig(), &stubQueue{}, nil, discardLogger())
+	_, err = New(testConfig(), &stubQueue{}, nil, ratelimit.Unlimited(), discardLogger())
 	require.Error(t, err)
 }
 
@@ -268,24 +306,50 @@ func TestRunIsolatesChannels(t *testing.T) {
 	}
 }
 
-// TestSafeSendWindowIgnoresClaimBatchSize, lease hesabının parti boyutundan bağımsız
+// TestLeaseWindowIgnoresClaimBatchSize, lease hesabının parti boyutundan bağımsız
 // olduğunu doğrular.
 //
 // Jeton semaforu sayesinde satır claim edilir edilmez bir sender'a gidiyor; tamponlu
 // bir kuyruk olsaydı pencere ceil(batch/concurrency) katına çıkardı.
-func TestSafeSendWindowIgnoresClaimBatchSize(t *testing.T) {
+func TestLeaseWindowIgnoresClaimBatchSize(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig()
+	cfg.RateWaitMax = 10 * time.Second
 	cfg.ProviderTimeout = 10 * time.Second
 	cfg.ResultTimeout = 3 * time.Second
 
 	cfg.ClaimBatchSize = 1
-	small := cfg.safeSendWindow()
+	small := cfg.leaseWindow()
 
 	cfg.ClaimBatchSize = 1000
-	large := cfg.safeSendWindow()
+	large := cfg.leaseWindow()
 
 	require.Equal(t, small, large)
-	require.Equal(t, 13*time.Second, small)
+	require.Equal(t, 23*time.Second, small)
+}
+
+// TestDrainWindowExcludesRateWait, kapanış penceresinin izin beklemesini
+// kapsamadığını doğrular.
+//
+// İzin beklemesi kapanışta iptal edilebiliyor (yan etkisi yok) ve satır kuyruğa
+// dönüyor; drain'in onu beklemesi gereksiz bir kapanış gecikmesi olurdu. Lease
+// penceresi ise onu kapsamak ZORUNDA: bekleme lease alınmış satırda geçiyor.
+func TestDrainWindowExcludesRateWait(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.RateWaitMax = 10 * time.Second
+	cfg.ProviderTimeout = 10 * time.Second
+	cfg.ResultTimeout = 3 * time.Second
+
+	require.Equal(t, 13*time.Second, cfg.drainWindow())
+	require.Equal(t, 23*time.Second, cfg.leaseWindow())
+
+	// Drain yalnızca 13s'i kapsamak zorunda, 23s'i değil.
+	cfg.LeaseDuration = time.Minute
+	cfg.DrainTimeout = 13 * time.Second
+
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	require.NoError(t, err)
 }

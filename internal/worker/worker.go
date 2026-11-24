@@ -17,15 +17,16 @@ import (
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
+	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
 	"github.com/XENWRLD/insider-notification-system/internal/store"
 )
 
-// leaseSafetyFactor, lease süresinin en kötü gönderim penceresine oranı.
+// leaseSafetyFactor, lease süresinin en kötü lease penceresine oranı.
 //
-// Pencere (ProviderTimeout + ResultTimeout) kontrolümüzdeki iki zaman aşımıyla
-// sınırlı; iki katı pay, GC duraklaması veya ağ gecikmesi gibi ölçmediğimiz
-// gecikmelere yer bırakıyor. Lease dolarsa reaper işi yeniden dağıtır ve mesaj
-// ikinci kez gider — bu yüzden pay cömert tutuluyor.
+// Pencere (bkz. leaseWindow) kontrolümüzdeki üç zaman aşımıyla sınırlı: izin
+// beklemesi, sağlayıcı çağrısı, sonuç yazımı. İki katı pay, GC duraklaması veya ağ
+// gecikmesi gibi ölçmediğimiz gecikmelere yer bırakıyor. Lease dolarsa reaper işi
+// yeniden dağıtır ve mesaj ikinci kez gider — bu yüzden pay cömert tutuluyor.
 const leaseSafetyFactor = 2
 
 // Queue, motorun veritabanından ihtiyaç duyduğu işlemler.
@@ -87,6 +88,12 @@ type Config struct {
 	// backoff + jitter bunun yerini alacak.
 	FixedRetryDelay time.Duration
 
+	// RateWaitMax, hız sınırından izin beklemenin üst sınırı.
+	//
+	// Bekleme satır lease altındayken geçiyor, bu yüzden lease hesabının üçüncü
+	// terimi (bkz. leaseWindow). Süre aşılırsa satır kuyruğa geri verilir.
+	RateWaitMax time.Duration
+
 	ReaperInterval  time.Duration
 	ReaperBatchSize int
 
@@ -97,12 +104,24 @@ type Config struct {
 	IdempotencyCleanupBatch    int
 }
 
-// safeSendWindow, bir satırın claim'den sonra elde tutulabileceği en kötü süre.
+// leaseWindow, bir satırın claim'den sonra lease altında geçirebileceği en kötü süre.
+//
+// Üç terim: hız sınırından izin beklemek, sağlayıcı çağrısı, sonuç yazımı. İzin
+// beklemesi DAHİL çünkü satır o sırada claim edilmiş ve lease'i bizde.
 //
 // Jeton semaforu sayesinde bir satır claim edilir edilmez bir sender'a gider; yani
-// pencere tek dalga: sağlayıcı çağrısı + sonuç yazımı. ClaimBatchSize bu hesaba
-// GİRMEZ — tamponlu bir kuyruk olsaydı satırlar sıra bekleyip pencereyi katlardı.
-func (c Config) safeSendWindow() time.Duration {
+// pencere tek dalga. ClaimBatchSize bu hesaba GİRMEZ — tamponlu bir dağıtım kuyruğu
+// olsaydı satırlar sıra bekleyip pencereyi katlardı.
+func (c Config) leaseWindow() time.Duration {
+	return c.RateWaitMax + c.ProviderTimeout + c.ResultTimeout
+}
+
+// drainWindow, kapanışta uçan işin bitmesi için beklenecek en kötü süre.
+//
+// İzin beklemesi DAHİL DEĞİL: o bekleme kapanışta iptal edilebiliyor (yan etkisi
+// olmadığı için) ve satır kuyruğa dönüyor. Kesilemeyen tek şey başlamış bir
+// gönderim ve onun sonuç yazımı.
+func (c Config) drainWindow() time.Duration {
 	return c.ProviderTimeout + c.ResultTimeout
 }
 
@@ -125,6 +144,7 @@ func (c Config) validate() error {
 		{"ResultTimeout", c.ResultTimeout},
 		{"DrainTimeout", c.DrainTimeout},
 		{"FixedRetryDelay", c.FixedRetryDelay},
+		{"RateWaitMax", c.RateWaitMax},
 		{"ReaperInterval", c.ReaperInterval},
 		{"IdempotencyTTL", c.IdempotencyTTL},
 		{"IdempotencyCleanupInterval", c.IdempotencyCleanupInterval},
@@ -154,24 +174,30 @@ func (c Config) validate() error {
 			c.PollMinInterval, c.PollMaxInterval))
 	}
 
-	// Lease, en kötü gönderim penceresini güvenli payla kapsamalı. Kapsamazsa lease
-	// iş bitmeden dolar, reaper satırı devralır ve aynı mesaj ikinci kez gider.
-	if window := c.safeSendWindow(); window > 0 {
+	// Lease, satırın lease altında geçirebileceği en kötü süreyi güvenli payla
+	// kapsamalı. Kapsamazsa lease iş bitmeden dolar, reaper satırı devralır ve aynı
+	// mesaj ikinci kez gider.
+	if window := c.leaseWindow(); window > 0 {
 		required := leaseSafetyFactor * window
 		if c.LeaseDuration < required {
 			problems = append(problems, fmt.Sprintf(
-				"LeaseDuration en az %s olmalı (%d × (ProviderTimeout %s + ResultTimeout %s)), verilen: %s",
-				required, leaseSafetyFactor, c.ProviderTimeout, c.ResultTimeout, c.LeaseDuration))
+				"LeaseDuration en az %s olmalı "+
+					"(%d × (RateWaitMax %s + ProviderTimeout %s + ResultTimeout %s)), verilen: %s",
+				required, leaseSafetyFactor,
+				c.RateWaitMax, c.ProviderTimeout, c.ResultTimeout, c.LeaseDuration))
 		}
+	}
 
-		// Kapanış penceresi uçan gönderim + sonuç yazımını kapsamalı. Kapsamazsa Run
-		// sender'lar hâlâ çalışırken döner, main havuzu kapatır ve başarılı
-		// gönderimlerin sonucu yazılamaz — satır reaper'a kadar processing'de kalır.
-		if c.DrainTimeout < window {
-			problems = append(problems, fmt.Sprintf(
-				"DrainTimeout en az %s olmalı (ProviderTimeout %s + ResultTimeout %s), verilen: %s",
-				window, c.ProviderTimeout, c.ResultTimeout, c.DrainTimeout))
-		}
+	// Kapanış penceresi uçan gönderim + sonuç yazımını kapsamalı. Kapsamazsa Run
+	// sender'lar hâlâ çalışırken döner, main havuzu kapatır ve başarılı gönderimlerin
+	// sonucu yazılamaz — satır reaper'a kadar processing'de kalır.
+	//
+	// İzin beklemesi bu pencereye girmiyor: kapanışta iptal edilip satır kuyruğa
+	// döndüğü için drain'in onu beklemesi gerekmiyor.
+	if window := c.drainWindow(); window > 0 && c.DrainTimeout < window {
+		problems = append(problems, fmt.Sprintf(
+			"DrainTimeout en az %s olmalı (ProviderTimeout %s + ResultTimeout %s), verilen: %s",
+			window, c.ProviderTimeout, c.ResultTimeout, c.DrainTimeout))
 	}
 
 	for _, channel := range c.Channels {
@@ -199,17 +225,20 @@ func joinProblems(problems []string) string {
 
 // Engine, worker motoru.
 type Engine struct {
-	cfg    Config
-	queue  Queue
-	sender Sender
-	logger *slog.Logger
+	cfg     Config
+	queue   Queue
+	sender  Sender
+	limiter ratelimit.Limiter
+	logger  *slog.Logger
 }
 
 // New, ayarları doğrulayıp motoru kurar.
 //
 // Doğrulama boot'ta yapılıyor: yanlış ayarla çalışan bir worker saatler sonra
 // "neden mesajlar iki kez gidiyor" sorusuna dönüşürdü.
-func New(cfg Config, queue Queue, sender Sender, logger *slog.Logger) (*Engine, error) {
+func New(
+	cfg Config, queue Queue, sender Sender, limiter ratelimit.Limiter, logger *slog.Logger,
+) (*Engine, error) {
 	if len(cfg.Channels) == 0 {
 		cfg.Channels = []domain.Channel{domain.ChannelSMS, domain.ChannelEmail, domain.ChannelPush}
 	}
@@ -222,7 +251,15 @@ func New(cfg Config, queue Queue, sender Sender, logger *slog.Logger) (*Engine, 
 		return nil, errors.New("worker kuyruk ve gönderici olmadan çalışamaz")
 	}
 
-	return &Engine{cfg: cfg, queue: queue, sender: sender, logger: logger}, nil
+	// Limiter zorunlu: eksikse hız sınırı sessizce kapanırdı. Sınırsız çalışmak
+	// isteyen test ratelimit.Unlimited() geçiyor — bilinçli ve görünür bir seçim.
+	if limiter == nil {
+		return nil, errors.New("worker hız sınırlayıcı olmadan çalışamaz")
+	}
+
+	return &Engine{
+		cfg: cfg, queue: queue, sender: sender, limiter: limiter, logger: logger,
+	}, nil
 }
 
 // Run, motoru çalıştırır ve context iptal edilene kadar bloklar.
@@ -261,6 +298,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		slog.Int("concurrency", e.cfg.Concurrency),
 		slog.Int("claim_batch_size", e.cfg.ClaimBatchSize),
 		slog.String("lease_duration", e.cfg.LeaseDuration.String()),
+		slog.String("rate_wait_max", e.cfg.RateWaitMax.String()),
 	)
 
 	if err := group.Wait(); err != nil {

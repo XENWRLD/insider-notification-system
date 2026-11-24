@@ -455,3 +455,82 @@ func TestClaimQueryUsesClaimIndex(t *testing.T) {
 	require.NotContains(t, plan, "Sort", "index sırası ORDER BY ile aynı, sıralama gerekmemeli")
 	require.Contains(t, planLine(t, plan, "Index Cond"), "channel")
 }
+
+// seedPriority, belirli öncelikte çekilmeye hazır satırlar üretir.
+func seedPriority(t *testing.T, pool *pgxpool.Pool, priority string, count int) {
+	t.Helper()
+
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO notifications (id, channel, recipient, content, priority, correlation_id, available_at)
+		SELECT gen_random_uuid(), 'sms', '+90555' || lpad(i::text, 7, '0'), 'yuk',
+		       $2, gen_random_uuid()::text, now() - interval '1 second'
+		FROM generate_series(1, $1) AS i`, count, priority)
+	require.NoError(t, err)
+}
+
+// TestClaimLeavesLowPriorityBehindWhileHighPriorityArrives, starvation davranışını
+// SABİTLER — düzeltmez.
+//
+// PLAN §11 soru 7'nin ("Low priority mesajlar hiç gönderilmeyebilir mi?") cevabı:
+// EVET. Kuyruk sırası tek bir ORDER BY ile belirleniyor (priority_rank, available_at,
+// id) ve yüksek öncelikli satır akışı sürdükçe düşük öncelikli satır hiç öne geçemez.
+//
+// Aging bilinçli olarak UYGULANMADI: sıra anahtarına bir "yaş" terimi eklemek
+// (örn. priority_rank - floor(age / threshold)) claim index'ini ve onun üzerine
+// kurulu bütün plan kararlarını değiştirir. Yük altında ölçmeden yapılacak bir
+// değişiklik değil; README'de gerekçesi ve çözüm yolu yazılı.
+//
+// Bu test o davranışın BİLİNÇLİ olduğunun kanıtı: aging eklenirse kırılır ve
+// kıranın kararı yeniden gözden geçirmesi gerekir.
+func TestClaimLeavesLowPriorityBehindWhileHighPriorityArrives(t *testing.T) {
+	pool := sharedPool(t)
+	store := New(pool)
+	ctx := context.Background()
+
+	// Tek bir düşük öncelikli satır, herkesten önce kuyruğa girdi.
+	lowPriority := newTestNotification(t, "sms", "low")
+	require.NoError(t, createPlain(t, store, ctx, lowPriority))
+
+	_, err := pool.Exec(ctx,
+		`UPDATE notifications SET available_at = now() - interval '1 hour' WHERE id = $1`,
+		lowPriority.ID)
+	require.NoError(t, err)
+
+	// Üç tur: her turda yüksek öncelikli yeni iş geliyor ve bir parti çekiliyor.
+	for round := 1; round <= 3; round++ {
+		seedPriority(t, pool, "high", 20)
+
+		claimed, err := store.ClaimNotifications(ctx, domain.ChannelSMS, 20, testLease)
+		require.NoError(t, err)
+		require.Len(t, claimed, 20, "tur %d", round)
+
+		for _, notification := range claimed {
+			require.Equal(t, domain.PriorityHigh, notification.Priority,
+				"tur %d: yüksek öncelik varken düşük öncelik çekilmemeli", round)
+		}
+
+		// Çekilenleri tamamla ki bir sonraki tur temiz başlasın.
+		for _, notification := range claimed {
+			require.NoError(t, store.CompleteNotification(ctx, NotificationResult{
+				ID:         notification.ID,
+				LeaseToken: *notification.LeaseToken,
+				Status:     domain.StatusSent,
+				StatusCode: ptr(202),
+			}))
+		}
+	}
+
+	// En eski satır hâlâ gönderilmedi: bir saattir bekliyor ve sırası hiç gelmedi.
+	after, err := store.GetNotification(ctx, lowPriority.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.StatusPending, after.Notification.Status,
+		"düşük öncelikli satır yüksek öncelik akışının arkasında kaldı (starvation)")
+	require.Zero(t, after.Notification.AttemptCount)
+
+	// Yüksek öncelikli iş bittiğinde sıra ona geliyor: starvation kalıcı değil,
+	// yüksek öncelikli akışın sürmesine bağlı.
+	claimed, err := store.ClaimNotifications(ctx, domain.ChannelSMS, 20, testLease)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.Equal(t, lowPriority.ID, claimed[0].ID)
+}

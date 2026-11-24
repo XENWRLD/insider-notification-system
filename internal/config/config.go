@@ -70,6 +70,24 @@ type Config struct {
 	WorkerReaperBatchSize int
 	// WorkerDBMaxConns, worker'ın bağlantı havuzu boyutu.
 	WorkerDBMaxConns int
+	// WorkerRateWaitMax, hız sınırından izin beklemenin üst sınırı.
+	// Bekleme satır lease altındayken geçtiği için lease hesabının bir terimi.
+	WorkerRateWaitMax time.Duration
+
+	// RateLimitPerSecond, KANAL BAŞINA saniyedeki gönderim sınırı.
+	//
+	// Sınır Redis'te paylaşılan bir kovada tutulur: --scale worker=3 ile üç kopya da
+	// aynı kovayı tüketir, dolayısıyla toplam hız değişmez. Kapatma anahtarı yok —
+	// limitsiz çalışmak gerçek bir sağlayıcıyı anında 429'a sokardı.
+	RateLimitPerSecond int
+
+	// RateLimitBurst, kovanın biriktirebileceği en fazla izin (GCRA tolerans penceresi).
+	//
+	// 1 olsaydı tolerans sıfır olur ve jitter'lı yoklama yüzünden kaçan yuvalar geri
+	// gelmediği için gerçekleşen hız limitin %20 altında kalırdı (ölçüldü). Burst =
+	// rate olsaydı boşta kalmış kova ilk saniyede ~2× rate geçirirdi. Varsayılan 5:
+	// en kötü tek saniyelik pencere rate + 4, gerçekleşen hız ≈ rate.
+	RateLimitBurst int
 	// IdempotencyCleanupInterval/Batch, süresi dolmuş anahtarların temizliği.
 	IdempotencyCleanupInterval time.Duration
 	IdempotencyCleanupBatch    int
@@ -141,6 +159,7 @@ func Load() (Config, error) {
 		{"WORKER_DRAIN_TIMEOUT", &cfg.WorkerDrainTimeout, 20 * time.Second},
 		{"WORKER_RETRY_DELAY", &cfg.WorkerRetryDelay, 5 * time.Second},
 		{"WORKER_REAPER_INTERVAL", &cfg.WorkerReaperInterval, 10 * time.Second},
+		{"WORKER_RATE_WAIT_MAX", &cfg.WorkerRateWaitMax, 10 * time.Second},
 		{"IDEMPOTENCY_CLEANUP_INTERVAL", &cfg.IdempotencyCleanupInterval, time.Hour},
 	} {
 		value, err := envDuration(field.key, field.fallback)
@@ -160,6 +179,8 @@ func Load() (Config, error) {
 		{"WORKER_CLAIM_BATCH_SIZE", &cfg.WorkerClaimBatchSize, 20},
 		{"WORKER_REAPER_BATCH_SIZE", &cfg.WorkerReaperBatchSize, 100},
 		{"WORKER_DB_MAX_CONNS", &cfg.WorkerDBMaxConns, 16},
+		{"RATE_LIMIT_PER_SECOND", &cfg.RateLimitPerSecond, 100},
+		{"RATE_LIMIT_BURST", &cfg.RateLimitBurst, 5},
 		{"IDEMPOTENCY_CLEANUP_BATCH", &cfg.IdempotencyCleanupBatch, 1000},
 	} {
 		value, err := envInt(field.key, field.fallback)

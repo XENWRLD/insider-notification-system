@@ -55,34 +55,61 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	t.Cleanup(func() { _ = client.Close() })
 
-	_, err := New(nil, 100, DefaultKeyPrefix)
+	_, err := New(nil, 100, testBurst, DefaultKeyPrefix)
 	require.Error(t, err, "istemci olmadan limiter kurulmamalı")
 
 	for _, perSecond := range []int{0, -1} {
-		_, err = New(client, perSecond, DefaultKeyPrefix)
+		_, err = New(client, perSecond, testBurst, DefaultKeyPrefix)
 		require.Error(t, err, "saniyedeki izin: %d", perSecond)
 	}
 
-	_, err = New(client, 100, "   ")
+	// burst < 1 toleransi anlamsiz kilar; burst > rate ise kovanin bir saniyede
+	// uretilenden fazlasini biriktirmesi demek olurdu.
+	for _, burst := range []int{0, -1, 101} {
+		_, err = New(client, 100, burst, DefaultKeyPrefix)
+		require.Error(t, err, "burst: %d", burst)
+	}
+
+	_, err = New(client, 100, 100, DefaultKeyPrefix)
+	require.NoError(t, err, "burst = rate sinirda kabul edilmeli")
+
+	_, err = New(client, 100, testBurst, "   ")
 	require.Error(t, err, "boş önek bütün kanalları tek kovaya düşürürdü")
 }
 
-// TestNewUsesBurstOfOne, gereksinimin kodda sabitlendiğini doğrular.
+// TestNewDerivesInternalRateFromBurst, "en fazla perSecond/sn" sözünün kodda
+// sabitlendiğini doğrular.
 //
-// redis_rate.PerSecond(n) burst'ü n yapıyor ve ilk saniyede ~2n mesaj geçirirdi;
-// "kanal başına en fazla 100/sn" bu yüzden ihlal olurdu. Bu test o regresyonu kapatır.
-func TestNewUsesBurstOfOne(t *testing.T) {
+// GCRA'da bir saniyelik pencerede en fazla Rate + (Burst-1) izin çıkar. perSecond'ı
+// kütüphaneye doğrudan vermek sınırı burst-1 kadar AŞARDI (burst 5 ile 104). İç hız
+// geri hesaplanıyor:
+//
+//	internalRate   = perSecond - (burst - 1)
+//	en kötü pencere = internalRate + (burst - 1) = perSecond
+func TestNewDerivesInternalRateFromBurst(t *testing.T) {
 	t.Parallel()
 
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	t.Cleanup(func() { _ = client.Close() })
 
-	limiter, err := New(client, 100, DefaultKeyPrefix)
-	require.NoError(t, err)
+	const perSecond = 100
 
-	require.Equal(t, 1, limiter.limit.Burst, "burst 1 olmalı: tepe asla rate'i aşmasın")
-	require.Equal(t, 100, limiter.limit.Rate)
-	require.Equal(t, time.Second, limiter.limit.Period)
+	for _, burst := range []int{1, 5, 20, perSecond} {
+		limiter, err := New(client, perSecond, burst, DefaultKeyPrefix)
+		require.NoError(t, err)
+
+		require.Equal(t, burst, limiter.limit.Burst,
+			"burst çağıranın verdiği değer olmalı, kütüphane varsayılanı değil")
+		require.Equal(t, perSecond-(burst-1), limiter.limit.Rate,
+			"iç hız burst kadar geri alınmalı")
+		require.Equal(t, time.Second, limiter.limit.Period)
+
+		// Asıl söz: en kötü bir saniyelik pencere sınırı aşmıyor.
+		require.Equal(t, perSecond, limiter.limit.Rate+(limiter.limit.Burst-1),
+			"en kötü pencere tam perSecond olmalı")
+
+		require.Positive(t, limiter.limit.Rate, "iç hız pozitif kalmalı")
+	}
 }
 
 // TestKeySeparatesChannels, her kanalın ayrı kovaya düştüğünü doğrular.
@@ -94,7 +121,7 @@ func TestKeySeparatesChannels(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	t.Cleanup(func() { _ = client.Close() })
 
-	limiter, err := New(client, 100, "test-prefix")
+	limiter, err := New(client, 100, testBurst, "test-prefix")
 	require.NoError(t, err)
 
 	require.Equal(t, "test-prefix:sms", limiter.key(domain.ChannelSMS))
@@ -116,7 +143,7 @@ func TestAllowReturnsErrorWhenRedisUnavailable(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = client.Close() })
 
-	limiter, err := New(client, 100, DefaultKeyPrefix)
+	limiter, err := New(client, 100, testBurst, DefaultKeyPrefix)
 	require.NoError(t, err)
 
 	decision, err := limiter.Allow(context.Background(), domain.ChannelSMS)

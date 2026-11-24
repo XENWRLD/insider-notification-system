@@ -265,9 +265,46 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         kodlarında üretiliyor, yani sağlayıcı kabul etmiş. `retrying` yapmak çift
         gönderim olurdu (gövdesi JSON olmayan sağlayıcıda her mesaj 5 kez giderdi)
   - [x] **Başarı = her 2xx, yalnızca 202 değil:** webhook.site 200 dönüyor
-- [ ] **Adım 7 — Rate limit + öncelik:** Redis jeton kovası, `--scale worker=3` demosu → `feat: add distributed rate limiting and priority ordering`
-  - [ ] Rate limit bekleme süresi lease süresi içinde geçiyor; jeton claim'den önce mi
-        alınacak, yoksa bekleme süresi sınırlanıp lease hesabına mı eklenecek? Karar Adım 7'de.
+- [x] **Adım 7 — Rate limit + öncelik:** Redis jeton kovası, `--scale worker=3` demosu → `feat: add distributed rate limiting and priority ordering`
+      *(adım üç commit'e bölündü: `feat: add redis token bucket rate limiter`,
+      `refactor: move lease hand-back to the engine`, `feat: add distributed rate
+      limiting and priority ordering`)*
+  - [x] **Açık soru cevaplandı: izin SENDER'da, `Send`'den hemen önce alınıyor.**
+        Bekleme lease penceresinin içinde geçiyor ama `WORKER_RATE_WAIT_MAX` (10s) ile
+        sınırlı ve lease formülüne dâhil: `lease >= 2 × (rate_wait + provider + result)`
+        = `2 × 23s` = 46s <= 60s. Claim'den önce izin almak REDDEDİLDİ: izinler kaç
+        satır olduğu bilinmeden alındığı için claim az satır döndürdüğünde boşa yanıyor
+        (hesap: 5 msg/sn'lik trafik 100/sn limitinde throttle olurdu). Sender'da
+        **1 izin = 1 gerçek gönderim**, israf sıfır
+  - [x] **`RATE_LIMIT_PER_SECOND` = "herhangi bir 1 sn'lik pencerede en fazla".**
+        GCRA'da pencere `Rate + (Burst-1)` olduğu için iç hız geri hesaplanıyor:
+        `internalRate = perSecond - (burst-1)` → 100 ve burst 5 için 96, en kötü
+        pencere tam 100. `Burst` ayarlanabilir (`RATE_LIMIT_BURST`, varsayılan 5) ve
+        ÖLÇÜMLE seçildi: `PerSecond(n)` (burst=n) ilk saniyede ~2n geçirirdi;
+        `burst=1` toleransı sıfırladığı için kaçan yuvalar geri gelmiyor ve hız %20
+        düşüyordu (14.0 sn); `burst=5` + iç hız 96 ile hem sınır korunuyor hem kayıp %4
+  - [x] **Fail closed:** Redis'e ulaşılamazsa gönderim YAPILMAZ; hata reddedilmiş
+        izinle aynı muameleyi görüyor (sınırlı süre yeniden denenir, sonra satır
+        kuyruğa döner). "Hata hâlinde lease'i hemen geri ver" denseydi Redis düştüğünde
+        claim → hata → release döngüsü Postgres'i döverdi; beklemek jetonu sender'da
+        tuttuğu için backpressure'ı semafor sağlıyor
+  - [x] **Tek izin sorgusuna kendi zaman aşımı** (`rateAllowTimeout`, 1s) — canlı
+        ölçümde yakalandı: Redis container'ı durdurulduğunda go-redis çağrısı istemci
+        içinde bloklanıyor ve tek çağrı bütün bekleme bütçesini yiyordu (ne hata
+        loglanıyor ne yeniden deneniyor). Regresyon testi: `TestPermitWaitBoundsEachLimiterCall`
+  - [x] **Bekleme katlanıyor** (taban 10ms → tavan 250ms, full jitter): GCRA'nın
+        `RetryAfter`'ı "bir sonraki izne kadar" (~10ms) ve bekleyen herkes aynı değeri
+        alıyor; doğrudan beklemek kova boşken saniyede binlerce sorgu üretirdi
+  - [x] **İki ayrı pencere:** `leaseWindow = rate_wait + provider + result` (bekleme
+        lease altında geçiyor), `drainWindow = provider + result` (bekleme kapanışta
+        iptal edilebiliyor, satır kuyruğa dönüyor)
+  - [x] **Starvation uygulanmadı, belgelendi:** `TestClaimLeavesLowPriorityBehindWhileHighPriorityArrives`
+        davranışı sabitliyor (yüksek öncelik akışı sürdükçe düşük öncelik beklemede
+        kalır), README'de gerekçe ve aging çözüm yolu yazılı. PLAN §11 soru 7'nin cevabı
+  - [x] **Ölçümler:** 1000 SMS → 1 worker 12.1 sn (maks 98/sn) / 3 worker 10.9 sn
+        (her tam saniyede tam 96, maks 96) — hız ARTMIYOR ve **sınır hiç aşılmıyor**.
+        Toplam sağlayıcı isteği 1000 (çift gönderim yok). Kanal izolasyonu: 562 SMS
+        kuyrukta beklerken 5 e-posta 1.09 sn'de gönderildi
 - [ ] **Adım 8 — Retry + hata yönetimi:** sınıflandırma, backoff + jitter, attempts tablosu, circuit breaker → `feat: implement retry policy and circuit breaker`
   - [ ] Yalnızca `internal/worker/classify.go` gövdesi değişecek (Adım 6 dikişi):
         400/422 → hemen `failed`; 429 → `provider.StatusError.RetryAfter`;
@@ -301,6 +338,25 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         güvenli bir tercihtir."
   - [ ] README'de batch sınırları: "1000 kayıt ve 16 MB sınırı birlikte uygulanır;
         Türkçe/emoji içerikli çok uzun e-posta batch'leri byte sınırına önce takılabilir."
+  - [ ] README'de starvation: yüksek öncelikli mesaj akışı sürdükçe düşük öncelikli
+        mesaj hiç gönderilmeyebilir. Kuyruk sırası tek bir `ORDER BY priority_rank,
+        available_at, id` ile belirleniyor ve bu, claim index'inin kolon sırasıyla
+        birebir aynı. Aging (yaşlanan işin öncelik kazanması) bilinçli olarak
+        uygulanmadı: sıra anahtarına yaş terimi eklemek
+        (örn. `priority_rank - floor(age/threshold)`) index'i ve üzerine kurulu bütün
+        plan kararlarını değiştirir — yük altında ölçmeden yapılacak bir değişiklik
+        değil. Davranış `TestClaimLeavesLowPriorityBehindWhileHighPriorityArrives` ile
+        sabitlendi.
+  - [ ] README'de rate limit: izin gönderimden hemen önce alınıyor (1 izin = 1 gerçek
+        gönderim). Bedeli: izin bekleyen satır `processing` olduğu için o süre boyunca
+        iptal edilemez (tipik 0.6 sn, en kötü `WORKER_RATE_WAIT_MAX`) ve öncelik sırası
+        bir dalga boyunca donar. Claim öncesi izinde bu iki sorun olmazdı ama izinler
+        boşa yanardı.
+  - [ ] README'de `WORKER_CONCURRENCY` sizing: limite göre aşırı büyük tutulmamalı.
+        Throttle altında sender'lar izin beklerken lease tutuyor; `rate=1/sn` +
+        `concurrency=20` olsaydı 20 satır 20 saniye rehin kalırdı. Sağlıklı ilişki
+        `concurrency ≈ rate × (sağlayıcı gecikmesi + sonuç yazımı)` + pay.
+        "izin beklemesi aşıldı" uyarıları çoğalıyorsa bu ayar yanlış.
   - [ ] README'de kapanışta geri verilen iş: `ReleaseLeases` ile kuyruğa dönen hiç
         denenmemiş satır `retrying` + `attempt_count = 0` görünür. `processing → pending`
         durum makinesinde yasak olduğu için satır `retrying`'e düşer, ama denemesi

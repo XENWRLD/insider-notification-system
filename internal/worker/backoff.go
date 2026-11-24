@@ -34,15 +34,37 @@ func (b *backoff) reset() {
 // next, bu tur beklenecek süreyi verir ve pencereyi büyütür.
 func (b *backoff) next() time.Duration {
 	window := b.window
+	b.window = grow(b.window, b.max)
 
-	if b.window < b.max {
-		if doubled := b.window * 2; doubled > b.max || doubled <= 0 {
-			b.window = b.max
-		} else {
-			b.window = doubled
-		}
+	return jitter(window)
+}
+
+// wait, bekler ve context iptal edilmediyse true döner.
+func (b *backoff) wait(ctx context.Context) bool {
+	return sleep(ctx, b.next())
+}
+
+// grow, pencereyi iki katına çıkarır ve üst sınırda durdurur.
+//
+// Taşma kontrolü var: çok büyük bir pencere ikiyle çarpıldığında negatife düşebilir
+// ve negatif süre beklemek sessizce beklememek olurdu.
+func grow(window, max time.Duration) time.Duration {
+	if window >= max {
+		return max
 	}
 
+	if doubled := window * 2; doubled > max || doubled <= 0 {
+		return max
+	}
+
+	return window * 2
+}
+
+// jitter, (0, window] aralığında rastgele bir süre verir (full jitter).
+//
+// Sabit bekleme olsaydı aynı anda bekleyen onlarca goroutine (worker kopyaları ya da
+// aynı kovayı bekleyen sender'lar) aynı anda uyanır ve hedefe eşzamanlı sürü inerdi.
+func jitter(window time.Duration) time.Duration {
 	if window <= 0 {
 		return 0
 	}
@@ -52,17 +74,16 @@ func (b *backoff) next() time.Duration {
 	return time.Duration(rand.Int64N(int64(window)) + 1)
 }
 
-// wait, bekler ve context iptal edilmediyse true döner.
+// sleep, verilen süre kadar bekler; context iptal edilirse false döner.
 //
-// Çıplak time.Sleep kullanılmıyor: kapanış sinyali gelince worker en fazla
-// PollMaxInterval kadar değil, hemen çıkmalı.
-func (b *backoff) wait(ctx context.Context) bool {
-	delay := b.next()
-	if delay <= 0 {
+// Çıplak time.Sleep kullanılmıyor: kapanış sinyali gelince worker beklemenin
+// sonunu değil, hemen çıkmayı seçmeli.
+func sleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
 		return ctx.Err() == nil
 	}
 
-	timer := time.NewTimer(delay)
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 
 	select {

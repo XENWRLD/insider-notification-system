@@ -4,8 +4,9 @@
 // gönderim kapasitesi API'den bağımsız ölçeklenebilir (docker compose --scale worker=3).
 //
 // HTTP dinlemez — dışa açık bir yüzeyi yok. Prometheus /metrics kararı Adım 9'da.
-// Redis bağlantısı da açılmaz: dağıtık rate limit Adım 7'de geliyor, o zamana kadar
-// Redis ile konuşacak bir şey yok.
+//
+// Redis'e bağlanır: kanal başına hız sınırı orada paylaşılan bir kovayla uygulanıyor,
+// böylece --scale worker=3 ile üç kopya da aynı sınırı tüketir.
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"github.com/XENWRLD/insider-notification-system/internal/config"
 	"github.com/XENWRLD/insider-notification-system/internal/observability"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
+	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
 	"github.com/XENWRLD/insider-notification-system/internal/store"
 	"github.com/XENWRLD/insider-notification-system/internal/worker"
 )
@@ -57,6 +59,24 @@ func run() error {
 	// kapanış sırasında bağlantısız kalmasın (defer sırası buna bağlı).
 	defer pool.Close()
 
+	redisClient, err := bootstrap.OpenRedis(ctx, logger, cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+
+	// Aynı gerekçe: uçan izin talepleri bağlantısız kalmasın.
+	defer func() {
+		if closeErr := redisClient.Close(); closeErr != nil {
+			logger.Error("redis bağlantısı kapatılamadı", slog.String("error", closeErr.Error()))
+		}
+	}()
+
+	limiter, err := ratelimit.New(
+		redisClient, cfg.RateLimitPerSecond, cfg.RateLimitBurst, ratelimit.DefaultKeyPrefix)
+	if err != nil {
+		return err
+	}
+
 	providerClient, err := provider.New(provider.Config{
 		URL:     cfg.ProviderURL,
 		Timeout: cfg.WorkerProviderTimeout,
@@ -80,13 +100,14 @@ func run() error {
 		ResultTimeout:   cfg.WorkerResultTimeout,
 		DrainTimeout:    cfg.WorkerDrainTimeout,
 		FixedRetryDelay: cfg.WorkerRetryDelay,
+		RateWaitMax:     cfg.WorkerRateWaitMax,
 		ReaperInterval:  cfg.WorkerReaperInterval,
 		ReaperBatchSize: cfg.WorkerReaperBatchSize,
 
 		IdempotencyTTL:             cfg.IdempotencyTTL,
 		IdempotencyCleanupInterval: cfg.IdempotencyCleanupInterval,
 		IdempotencyCleanupBatch:    cfg.IdempotencyCleanupBatch,
-	}, store.New(pool), providerClient, logger)
+	}, store.New(pool), providerClient, limiter, logger)
 	if err != nil {
 		return err
 	}
@@ -95,6 +116,8 @@ func run() error {
 		slog.String("env", cfg.AppEnv),
 		slog.String("provider_url", cfg.ProviderURL),
 		slog.Int("db_max_conns", cfg.WorkerDBMaxConns),
+		slog.Int("rate_limit_per_second", cfg.RateLimitPerSecond),
+		slog.Int("rate_limit_burst", cfg.RateLimitBurst),
 	)
 
 	return engine.Run(ctx)

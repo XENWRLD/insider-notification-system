@@ -136,6 +136,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # Hız sınırı Redis'teki paylaşılan kovada: Redis olmadan worker gönderim
+      # yapamaz (fail closed), o yüzden hazır olmasını bekliyor.
+      redis:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       mockprovider:

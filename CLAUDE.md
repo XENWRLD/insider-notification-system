@@ -17,18 +17,25 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   Adım 5 (okuma uçları: `GET {id}`, cursor listeleme, batch özeti, atomik iptal),
   Adım 6 (worker motoru: `internal/bootstrap`, claim/result/reaper sorguları,
   provider client + mock provider, kanal havuzları + jeton semaforu, reaper, janitor,
-  `cmd/worker`; dört commit)
-- **Sıradaki:** Adım 7 — rate limit + öncelik: Redis jeton kovası (`internal/ratelimit`),
-  kanal başına global 100 msg/sn, `--scale worker=3` demosu, starvation/aging.
-  PLAN §8'de Adım 7'ye yazılan açık soru: rate limit beklemesi lease süresi içinde
-  geçiyor; jeton claim'den önce mi alınacak?
-- **Henüz boş** (`.gitkeep`): `internal/ratelimit`, `api`, `deploy`, `loadtest`
+  `cmd/worker`; dört commit),
+  Adım 7 (dağıtık rate limit: `internal/ratelimit` GCRA kovası, izin sender'da,
+  fail closed, starvation belgelendi; üç commit)
+- **Sıradaki:** Adım 8 — retry + hata yönetimi: sınıflandırma (400/422 → failed,
+  429 → `provider.StatusError.RetryAfter`, 5xx/timeout → exponential backoff + jitter),
+  circuit breaker. **Yalnızca `internal/worker/classify.go` gövdesi değişecek** —
+  Adım 6'da bırakılan dikiş. PLAN §8'de Adım 8'e yazılan açık soru: claim sorgusu
+  iptal edilebilir ctx ile çalışıyor, kapanış tam claim sırasında gelirse satırlar
+  reaper'a kadar (~60 sn) bekler
+- **Henüz boş** (`.gitkeep`): `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
   `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`,
   `curl localhost:8081/health/live` → `{"status":"alive"}` ve `docker compose ps -a` →
   `migrate` `Exited (0)`, `api`/`mockprovider` `Up (healthy)`, `worker` `Up`.
   Uçtan uca: bildirim oluştur → 2 sn sonra `status=sent`, `attempts[0]` dolu,
-  `docker compose logs worker | grep <correlation-id>` satırı bulur
+  `docker compose logs worker | grep <correlation-id>` satırı bulur.
+  Rate limit: 1000'lik SMS batch'i 1 worker'da 12.1 sn, `make scale-worker N=3` ile
+  10.9 sn (hız artmıyor); saniyelik histogram `notification_attempts.created_at`
+  üzerinden maks 96-98, sınır (100) hiç aşılmıyor (bkz. Adım 7 notları)
 
 ### Şema notları (Adım 2)
 
@@ -161,6 +168,50 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 - **Ölçüm:** 1000 SMS → 7.7 sn (mock 50 ms gecikme); restart'ta iş kaybı yok, takılı
   `processing` satırı 0.
 
+### Rate limit (Adım 7'de sabitlendi)
+
+- **Kanal başına global 100 msg/sn**, Redis'te paylaşılan GCRA kovası
+  (`internal/ratelimit`). Sınır process'e değil kovaya ait: `--scale worker=3` ile üç
+  kopya da aynı anahtarı (`notifications:rate:<kanal>`) tüketir.
+  `TestAllowSharesBucketAcrossLimiterInstances` bunu sabitliyor.
+- **İzin SENDER'da, `Send`'den hemen önce alınır** → **1 izin = 1 gerçek gönderim**.
+  Claim'den önce almak reddedildi: izinler kaç satır olduğu bilinmeden alınır ve claim
+  az satır döndürdüğünde boşa yanar (5 msg/sn'lik trafik 100/sn limitinde throttle
+  olurdu). Bedeli: izin bekleyen satır `processing` olduğu için o süre boyunca iptal
+  edilemez ve öncelik sırası bir dalga donar — bilinçli takas.
+- **`RATE_LIMIT_PER_SECOND` = "herhangi bir 1 sn'lik pencerede en fazla".** GCRA'da
+  pencere `Rate + (Burst-1)` olduğu için iç hız geri hesaplanıyor:
+  `internalRate = perSecond - (burst-1)` (100 ve burst 5 için **96**), en kötü pencere
+  tam 100. `Burst` ayarlanabilir (`RATE_LIMIT_BURST`, varsayılan 5) ve ÖLÇÜMLE seçildi:
+  `PerSecond(n)` (burst=n) ilk saniyede ~2n geçirirdi; `burst=1` toleransı sıfırladığı
+  için kaçan yuvalar geri gelmiyor ve hız %20 düşüyordu (14.0 sn). `burst=5` + iç hız 96
+  ile kayıp %4.
+- **Fail closed:** Redis'e ulaşılamazsa gönderim YAPILMAZ. Hata reddedilmiş izinle aynı
+  muameleyi görür (sınırlı süre yeniden denenir, sonra satır kuyruğa döner). "Hata
+  hâlinde lease'i hemen geri ver" denseydi claim → hata → release döngüsü Postgres'i
+  döverdi; beklemek jetonu sender'da tuttuğu için **backpressure'ı semafor sağlıyor**.
+- **Tek izin sorgusunun kendi zaman aşımı var** (`rateAllowTimeout`, 1 sn). Canlı
+  ölçümde yakalandı: Redis container'ı durdurulduğunda go-redis çağrısı istemci içinde
+  bloklanıyor ve tek çağrı bütün bekleme bütçesini yiyordu — ne hata loglanıyor ne
+  yeniden deneniyor.
+- **Bekleme katlanıyor:** taban 10 ms → tavan 250 ms, full jitter. GCRA'nın
+  `RetryAfter`'ı "bir sonraki izne kadar" (~10 ms) ve **bekleyen herkes aynı değeri
+  alıyor**; doğrudan beklemek kova boşken saniyede binlerce sorgu üretirdi.
+- **İki ayrı pencere** (`worker.Config`): `leaseWindow = RateWaitMax + Provider +
+  Result` (bekleme lease altında geçiyor), `drainWindow = Provider + Result` (bekleme
+  kapanışta iptal edilebiliyor). `validate` ikisini de boot'ta zorluyor:
+  `lease >= 2 × 23s = 46s <= 60s` ✓.
+- **`WORKER_CONCURRENCY` limite göre aşırı büyük olmamalı:** throttle altında sender'lar
+  izin beklerken lease tutuyor. `concurrency ≈ rate × (sağlayıcı gecikmesi + sonuç
+  yazımı)` + pay. "izin beklemesi aşıldı" uyarıları çoğalıyorsa ayar yanlış.
+- **Starvation UYGULANMADI, belgelendi.** Yüksek öncelik akışı sürdükçe düşük öncelikli
+  satır beklemede kalır; `TestClaimLeavesLowPriorityBehindWhileHighPriorityArrives`
+  davranışı sabitliyor. Aging, sıra anahtarına yaş terimi eklemek demek ve claim
+  index'ini değiştirir — ölçmeden yapılmaz.
+- **Ölçüm:** 1000 SMS → 1 worker 12.1 sn (maks 98/sn), 3 worker 10.9 sn (her tam
+  saniyede tam 96, maks 96) — sınır hiç aşılmıyor; sağlayıcı isteği toplam 1000 (çift
+  gönderim yok). Kanal izolasyonu: 562 SMS kuyrukta beklerken 5 e-posta 1.09 sn'de gitti.
+
 ## Modül ve klasörler
 
 Modül yolu: `github.com/XENWRLD/insider-notification-system`
@@ -177,7 +228,7 @@ Modül yolu: `github.com/XENWRLD/insider-notification-system`
 | `internal/store` | PostgreSQL sorguları (elle yazılmış SQL) |
 | `internal/worker` | Havuzlar, claim, retry, reaper |
 | `internal/provider` | Dış sağlayıcı HTTP client'ı |
-| `internal/ratelimit` | Redis jeton kovası |
+| `internal/ratelimit` | Redis GCRA kovası: kanal başına global hız sınırı |
 | `internal/observability` | Logger, metrikler |
 | `migrations` | golang-migrate dosyaları |
 

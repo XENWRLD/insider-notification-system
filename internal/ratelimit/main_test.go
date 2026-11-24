@@ -105,11 +105,24 @@ func keyPrefixFor(t *testing.T) string {
 	return "test:" + t.Name()
 }
 
+// testBurst, testlerde kullanılan varsayılan burst.
+//
+// 1 seçildi: tolerans sıfır olduğu için "izin verildi mi" iddiaları zamanlamadan
+// bağımsız hâle geliyor. Üretim varsayılanı (5) ayrıca testleniyor.
+const testBurst = 1
+
 // newLimiter, teste özel kovası olan bir limiter kurar.
 func newLimiter(t *testing.T, perSecond int) *RedisLimiter {
 	t.Helper()
 
-	limiter, err := New(sharedClient(t), perSecond, keyPrefixFor(t))
+	return newLimiterWithBurst(t, perSecond, testBurst)
+}
+
+// newLimiterWithBurst, burst'ü de belirlenmiş bir limiter kurar.
+func newLimiterWithBurst(t *testing.T, perSecond, burst int) *RedisLimiter {
+	t.Helper()
+
+	limiter, err := New(sharedClient(t), perSecond, burst, keyPrefixFor(t))
 	require.NoError(t, err)
 
 	return limiter

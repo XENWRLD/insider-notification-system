@@ -175,11 +175,15 @@ func TestClaimerReturnsUnusedTokens(t *testing.T) {
 		"üç gönderim başlamalıydı")
 
 	// 20 jetonla claim edildi, 3'ü dağıtıldı → 17'si hemen geri verilmiş olmalı.
+	//
+	// İddia yalnızca waitFor ile: 17 boş jeton BİR KEZ gözlendiyse geri verme
+	// çalışmış demektir. Ardından ikinci bir require.Len koymak yarış üretiyordu —
+	// stub'ın senaryosu tükendikten sonra claimer boş turlar için jeton alıp geri
+	// vermeye devam ediyor, yani len(sem) sürekli oynuyor.
 	require.True(t, waitFor(t, 5*time.Second, func() bool {
 		return len(pool.sem) == cfg.Concurrency-3
-	}), "kullanılmayan jetonlar geri verilmeliydi, boşta: %d", len(pool.sem))
-
-	require.Len(t, pool.sem, 17)
+	}), "kullanılmayan jetonlar geri verilmeliydi (beklenen %d), son gözlenen: %d",
+		cfg.Concurrency-3, len(pool.sem))
 }
 
 // TestSemaphoreCountStableAfterManyRounds, yüzlerce boş / yarı dolu / hatalı claim

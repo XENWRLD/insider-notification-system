@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,40 +17,65 @@ import (
 // pencere içinde sayılır, (2) iddialar yalnızca ÜST SINIR'dır — yavaş bir makinede
 // beklenenden az izin çıkması testi kırmaz.
 
-// TestAllowGrantsOnlyOneBeforeEmissionInterval, Burst = 1 kararını doğrular.
+// TestAllowGrantsAtMostBurstBeforeEmissionInterval, burst'ün tolerans penceresi
+// olduğunu doğrular: boş kovadan ardı ardına EN ÇOK burst kadar izin çıkar.
 //
-// Boş kovadan ilk izin alınır, hemen ardından istenen reddedilir: emisyon aralığı
-// (10 ms) geçmeden ikinci izin yok. Burst rate'e eşit olsaydı (redis_rate.PerSecond)
-// yüzlerce izin üst üste verilirdi.
-func TestAllowGrantsOnlyOneBeforeEmissionInterval(t *testing.T) {
+// Burst kütüphane varsayılanına (= rate) bırakılsaydı yüzlerce izin üst üste
+// verilirdi ve ilk saniyede ~2 x rate mesaj geçerdi.
+func TestAllowGrantsAtMostBurstBeforeEmissionInterval(t *testing.T) {
 	t.Parallel()
 
-	limiter := newLimiter(t, 100)
-	ctx := context.Background()
+	// Hız bilinçli olarak DÜŞÜK: emisyon aralığı Period/internalRate olduğu için
+	// 10/sn ve burst 5'te ~166 ms. Döngünün kendi süresi (birkaç Redis gidiş-dönüşü,
+	// ~10 ms) bunun çok altında kalıyor, yani ölçüm sırasında yeni yuva AÇILMIYOR.
+	//
+	// 100/sn kullanılsaydı emisyon aralığı ~10 ms olur, döngü süresiyle aynı mertebeye
+	// düşer ve test makine hızına göre ara sıra kalırdı (gözlendi: 7 izin).
+	const perSecond = 10
 
-	first, err := limiter.Allow(ctx, domain.ChannelSMS)
-	require.NoError(t, err)
-	require.True(t, first.OK, "boş kovadan ilk izin verilmeli")
+	for _, burst := range []int{1, 5} {
+		t.Run(fmt.Sprintf("burst-%d", burst), func(t *testing.T) {
+			t.Parallel()
 
-	second, err := limiter.Allow(ctx, domain.ChannelSMS)
-	require.NoError(t, err)
-	require.False(t, second.OK, "emisyon aralığı geçmeden ikinci izin verilmemeli")
+			limiter := newLimiterWithBurst(t, perSecond, burst)
+			ctx := context.Background()
+
+			granted := 0
+
+			for range burst * 4 {
+				decision, err := limiter.Allow(ctx, domain.ChannelSMS)
+				require.NoError(t, err)
+
+				if decision.OK {
+					granted++
+				}
+			}
+
+			require.Positive(t, granted)
+			require.LessOrEqual(t, granted, burst+1,
+				"tolerans burst kadar olmali, verilen: %d", granted)
+		})
+	}
 }
 
 // TestAllowStaysUnderRateInOneSecondWindow, asıl gereksinimi doğrular: boş kovayla
-// bir saniyelik pencerede en çok rate + 1 izin verilir.
+// bir saniyelik pencerede en çok RATE kadar izin verilir — burst ne olursa olsun.
 //
-// +1 sınır etkisi: t=0'daki izin, saniye içinde akan rate kadar iznin dışında.
-// Yalnızca üst sınır iddia ediliyor; az izin çıkması testi kırmaz.
+// İç hız burst kadar geri alındığı için (internalRate = rate - burst + 1) en kötü
+// pencere tam rate'e eşit. Bu hesap yapılmasa burst 5 ile pencere 104 çıkardı ve
+// "kanal başına en fazla 100/sn" sözü tutulmamış olurdu.
 //
-// Burst = rate hatası bu testte ~2 × rate üretirdi.
+// Yalnızca UST SINIR iddia ediliyor: yavaş bir makinede az izin çıkması testi kırmaz.
 func TestAllowStaysUnderRateInOneSecondWindow(t *testing.T) {
 	t.Parallel()
 
 	// Düşük rate: emisyon aralığı 50 ms, pencere içinde ~20 izin beklenir.
-	const perSecond = 20
+	const (
+		perSecond = 20
+		burst     = 5
+	)
 
-	limiter := newLimiter(t, perSecond)
+	limiter := newLimiterWithBurst(t, perSecond, burst)
 	ctx := context.Background()
 
 	granted := 0
@@ -64,16 +90,16 @@ func TestAllowStaysUnderRateInOneSecondWindow(t *testing.T) {
 		}
 	}
 
-	require.LessOrEqual(t, granted, perSecond+1,
-		"bir saniyede en çok rate+1 izin verilmeli, verilen: %d", granted)
-	require.Positive(t, granted, "hiç izin verilmemesi de hata olurdu")
+	require.LessOrEqual(t, granted, perSecond,
+		"bir saniyede en cok rate izin verilmeli, verilen: %d", granted)
+	require.Positive(t, granted, "hic izin verilmemesi de hata olurdu")
 }
 
 // TestAllowReportsRetryAfterWhenExhausted, reddedilen talebin bekleme rehberi
 // döndürdüğünü doğrular.
 //
 // Tam değer değil aralık kontrol ediliyor: GCRA'nın hesabı mikrosaniye hassasiyetinde
-// ve makine hızına göre oynar. Üst sınır emisyon aralığı (1/rate), çünkü Burst = 1
+// ve makine hızına göre oynar. Üst sınır emisyon aralığı (1/rate), çünkü testBurst = 1
 // ile bir sonraki yuva en çok o kadar uzakta.
 func TestAllowReportsRetryAfterWhenExhausted(t *testing.T) {
 	t.Parallel()
@@ -150,10 +176,10 @@ func TestAllowSharesBucketAcrossLimiterInstances(t *testing.T) {
 	client := sharedClient(t)
 	ctx := context.Background()
 
-	first, err := New(client, 100, prefix)
+	first, err := New(client, 100, testBurst, prefix)
 	require.NoError(t, err)
 
-	second, err := New(client, 100, prefix)
+	second, err := New(client, 100, testBurst, prefix)
 	require.NoError(t, err)
 
 	// Birinci kopya izni alıyor.
@@ -176,10 +202,10 @@ func TestAllowSeparatesBucketsByPrefix(t *testing.T) {
 	client := sharedClient(t)
 	ctx := context.Background()
 
-	first, err := New(client, 100, keyPrefixFor(t)+":a")
+	first, err := New(client, 100, testBurst, keyPrefixFor(t)+":a")
 	require.NoError(t, err)
 
-	second, err := New(client, 100, keyPrefixFor(t)+":b")
+	second, err := New(client, 100, testBurst, keyPrefixFor(t)+":b")
 	require.NoError(t, err)
 
 	decision, err := first.Allow(ctx, domain.ChannelSMS)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
+	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
 	"github.com/XENWRLD/insider-notification-system/internal/store"
 )
 
@@ -37,6 +38,7 @@ func testConfig() Config {
 		ResultTimeout:   time.Second,
 		DrainTimeout:    5 * time.Second,
 		FixedRetryDelay: 5 * time.Second,
+		RateWaitMax:     300 * time.Millisecond,
 
 		ReaperInterval:  time.Millisecond,
 		ReaperBatchSize: 100,
@@ -87,6 +89,13 @@ type stubQueue struct {
 	// sınırını ölçen testler sürekli dolu bir kuyruğa ihtiyaç duyuyor.
 	alwaysFull bool
 
+	// claimedChannel: alwaysFull üretirken satırları İSTENEN kanalda üret.
+	// Kanal izolasyonu testleri hangi satırın hangi kanaldan geldiğini bilmek zorunda.
+	claimedChannel bool
+
+	// channels, üretilen her satırın kanalını tutar (channelOf ile okunur).
+	channels map[uuid.UUID]domain.Channel
+
 	completed   []store.NotificationResult
 	completeErr error
 	// completeCtxDone, sonuç yazımına gelen context'in iptal edilmiş olup olmadığını
@@ -105,7 +114,7 @@ type stubQueue struct {
 }
 
 func (q *stubQueue) ClaimNotifications(
-	_ context.Context, _ domain.Channel, limit int, _ time.Duration,
+	_ context.Context, channel domain.Channel, limit int, _ time.Duration,
 ) ([]*domain.Notification, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -130,13 +139,26 @@ func (q *stubQueue) ClaimNotifications(
 		}
 
 	case q.alwaysFull:
+		generated := domain.ChannelSMS
+		if q.claimedChannel {
+			generated = channel
+		}
+
 		claimed = make([]*domain.Notification, limit)
 		for i := range claimed {
-			claimed[i] = newTestNotification(domain.ChannelSMS, 1)
+			claimed[i] = newTestNotification(generated, 1)
 		}
 
 	default:
 		return nil, nil
+	}
+
+	if q.channels == nil {
+		q.channels = make(map[uuid.UUID]domain.Channel)
+	}
+
+	for _, notification := range claimed {
+		q.channels[notification.ID] = notification.Channel
 	}
 
 	current := q.outstanding.Add(int64(len(claimed)))
@@ -208,6 +230,14 @@ func (q *stubQueue) claimLimits() []int {
 	return append([]int(nil), q.claimArgs...)
 }
 
+// channelOf, claim edilmiş bir satırın kanalını verir.
+func (q *stubQueue) channelOf(id uuid.UUID) domain.Channel {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return q.channels[id]
+}
+
 // releasedHolds, geri verilen lease'lerin kopyasını verir.
 func (q *stubQueue) releasedHolds() [][]store.LeaseHold {
 	q.mu.Lock()
@@ -228,6 +258,9 @@ type stubSender struct {
 
 	// onSend, gönderim anında çalışır (eşzamanlılık testleri için).
 	onSend func()
+
+	// onSendCtx, gönderime geçen context'i inceler (zaman aşımı testleri için).
+	onSendCtx func(ctx context.Context)
 }
 
 func (s *stubSender) Send(
@@ -238,7 +271,12 @@ func (s *stubSender) Send(
 	delay := s.delay
 	resp, err := s.resp, s.err
 	onSend := s.onSend
+	onSendCtx := s.onSendCtx
 	s.mu.Unlock()
+
+	if onSendCtx != nil {
+		onSendCtx(ctx)
+	}
 
 	if onSend != nil {
 		onSend()
@@ -262,11 +300,90 @@ func (s *stubSender) callCount() int {
 	return s.calls
 }
 
-// newTestEngine, stub'larla bir motor kurar.
+// stubLimiter, ratelimit.Limiter arayüzünün test karşılığı.
+//
+// decisions sırayla tüketilir; liste tükenince son karar tekrarlanır. Böylece
+// "önce reddet sonra izin ver" ve "sürekli reddet" senaryoları aynı stub'la kurulur.
+type stubLimiter struct {
+	mu sync.Mutex
+
+	decisions []ratelimit.Decision
+	index     int
+	err       error
+
+	calls     atomic.Int64
+	byChannel map[domain.Channel]int
+}
+
+// newStubLimiter, verilen kararları sırayla veren bir limiter kurar.
+func newStubLimiter(decisions ...ratelimit.Decision) *stubLimiter {
+	return &stubLimiter{
+		decisions: decisions,
+		byChannel: make(map[domain.Channel]int),
+	}
+}
+
+// denyAllLimiter, hiç izin vermeyen limiter.
+func denyAllLimiter() *stubLimiter {
+	return newStubLimiter(ratelimit.Decision{OK: false, RetryAfter: time.Millisecond})
+}
+
+// failingLimiter, her çağrıda hata döndüren limiter (Redis erişilemez).
+func failingLimiter(err error) *stubLimiter {
+	limiter := newStubLimiter()
+	limiter.err = err
+
+	return limiter
+}
+
+func (l *stubLimiter) Allow(
+	_ context.Context, channel domain.Channel,
+) (ratelimit.Decision, error) {
+	l.calls.Add(1)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.byChannel[channel]++
+
+	if l.err != nil {
+		return ratelimit.Decision{}, l.err
+	}
+
+	if len(l.decisions) == 0 {
+		return ratelimit.Decision{OK: true}, nil
+	}
+
+	decision := l.decisions[min(l.index, len(l.decisions)-1)]
+	l.index++
+
+	return decision, nil
+}
+
+// channelCalls, bir kanal için yapılan izin talebi sayısını verir.
+func (l *stubLimiter) channelCalls(channel domain.Channel) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.byChannel[channel]
+}
+
+// newTestEngine, stub'larla ve sınırsız limiter'la bir motor kurar.
+//
+// Rate limit dışındaki davranışı ölçen testler Redis kurmak zorunda kalmasın.
 func newTestEngine(t *testing.T, cfg Config, queue Queue, sender Sender) *Engine {
 	t.Helper()
 
-	engine, err := New(cfg, queue, sender, discardLogger())
+	return newTestEngineWithLimiter(t, cfg, queue, sender, ratelimit.Unlimited())
+}
+
+// newTestEngineWithLimiter, hız sınırı davranışını ölçen testler için.
+func newTestEngineWithLimiter(
+	t *testing.T, cfg Config, queue Queue, sender Sender, limiter ratelimit.Limiter,
+) *Engine {
+	t.Helper()
+
+	engine, err := New(cfg, queue, sender, limiter, discardLogger())
 	if err != nil {
 		t.Fatalf("motor kurulamadı: %v", err)
 	}

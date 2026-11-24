@@ -202,3 +202,70 @@ func TestLoadRejectsInvalidWorkerValues(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadAppliesRateLimitDefaults, hız sınırı varsayılanlarını sabitler.
+//
+// Ayrıca kritik bir değişmezi doğruluyor: varsayılanlar worker.New'in şart koştuğu
+// lease eşitsizliğini sağlamalı. İzin beklemesi satır lease altındayken geçtiği için
+// lease penceresi üç terimli: rate + provider + result.
+func TestLoadAppliesRateLimitDefaults(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.Equal(t, 100, cfg.RateLimitPerSecond)
+	require.Equal(t, 10*time.Second, cfg.WorkerRateWaitMax)
+
+	leaseWindow := cfg.WorkerRateWaitMax + cfg.WorkerProviderTimeout + cfg.WorkerResultTimeout
+	require.Equal(t, 23*time.Second, leaseWindow)
+	require.GreaterOrEqual(t, cfg.WorkerLeaseDuration, 2*leaseWindow,
+		"varsayılan lease, izin beklemesi dâhil pencerenin iki katını kapsamalı")
+
+	drainWindow := cfg.WorkerProviderTimeout + cfg.WorkerResultTimeout
+	require.GreaterOrEqual(t, cfg.WorkerDrainTimeout, drainWindow,
+		"kapanış penceresi gönderim + sonuç yazımını kapsamalı")
+}
+
+// TestLoadReadsRateLimitOverrides, hız sınırı değişkenlerinin okunduğunu doğrular.
+func TestLoadReadsRateLimitOverrides(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("RATE_LIMIT_PER_SECOND", "250")
+	t.Setenv("WORKER_RATE_WAIT_MAX", "4s")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.Equal(t, 250, cfg.RateLimitPerSecond)
+	require.Equal(t, 4*time.Second, cfg.WorkerRateWaitMax)
+}
+
+// TestLoadRejectsInvalidRateLimitValues, geçersiz hız sınırı ayarlarının
+// yakalandığını doğrular.
+//
+// Sıfır da reddediliyor: "limitsiz" bir mod yok, çünkü limitsiz çalışmak gerçek bir
+// sağlayıcıyı anında 429'a sokardı.
+func TestLoadRejectsInvalidRateLimitValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "sınır sıfır", key: "RATE_LIMIT_PER_SECOND", value: "0"},
+		{name: "sınır negatif", key: "RATE_LIMIT_PER_SECOND", value: "-100"},
+		{name: "sınır sayı değil", key: "RATE_LIMIT_PER_SECOND", value: "yüz"},
+		{name: "bekleme geçersiz", key: "WORKER_RATE_WAIT_MAX", value: "on saniye"},
+		{name: "bekleme negatif", key: "WORKER_RATE_WAIT_MAX", value: "-10s"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(test.key, test.value)
+
+			_, err := Load()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), test.key)
+		})
+	}
+}

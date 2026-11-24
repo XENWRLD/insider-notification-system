@@ -8,7 +8,31 @@ import (
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
+	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
 	"github.com/XENWRLD/insider-notification-system/internal/store"
+)
+
+const (
+	// rateWaitFloor/rateWaitCeil, izin beklemesinin katlanan penceresinin sınırları.
+	//
+	// Taban, sağlayıcı "hemen dene" dediğinde bile iki istek arasına nefes koyar;
+	// tavan, bekleyen bir sender'ın en kötü yoklama sıklığını 4/sn'ye indirir.
+	// 60 sender × 4/sn = 240 izin sorgusu/sn, ki saniyede 100 izni tüketmeye yeter
+	// ama tavan olmadan ortaya çıkan binlerce istekten iki mertebe aşağıdadır.
+	rateWaitFloor = 10 * time.Millisecond
+	rateWaitCeil  = 250 * time.Millisecond
+
+	// rateAllowTimeout, TEK bir izin sorgusunun üst sınırı.
+	//
+	// Ölçümle eklendi: Redis container'ı durdurulduğunda (reddedilen bağlantının
+	// aksine) go-redis çağrısı istemci içinde uzun süre bloklanıyor. Zaman aşımı
+	// olmadan tek çağrı RateWaitMax'ın tamamını yiyordu — ne hata loglanıyor ne
+	// yeniden deneniyor, satır da 10 saniye lease altında kalıyordu.
+	//
+	// 1 saniye: sağlıklı bir Redis'te sorgu bir milisaniyenin altında, yani normal
+	// yolu hiç etkilemiyor; ölü Redis'te ise bütçe ~10 denemeye bölünüyor ve
+	// operatör ilk saniyede hata logunu görüyor.
+	rateAllowTimeout = time.Second
 )
 
 // handle, tek bir bildirimi sağlayıcıya gönderir ve sonucu yazar.
@@ -39,6 +63,14 @@ func (e *Engine) handle(ctx context.Context, notification *domain.Notification) 
 		return
 	}
 
+	// Hız sınırı: izin alınmadan sağlayıcıya gidilmez. İzin alınamazsa satır
+	// kuyruğa geri verilir — gönderim HİÇ yapılmaz.
+	if !e.awaitPermit(ctx, log, notification) {
+		e.releaseLeases(ctx, log, []*domain.Notification{notification})
+
+		return
+	}
+
 	resp, elapsed, sendErr := e.send(ctx, notification)
 
 	result := classify(notification, resp, sendErr, e.cfg.FixedRetryDelay, elapsed)
@@ -46,6 +78,95 @@ func (e *Engine) handle(ctx context.Context, notification *domain.Notification) 
 	logOutcome(ctx, log, result, sendErr, elapsed)
 
 	e.writeResult(ctx, log, result)
+}
+
+// awaitPermit, kanalın hız sınırından bir gönderim izni bekler.
+//
+// İzin alınırsa true; alınamazsa false döner ve çağıran satırı kuyruğa geri verir.
+//
+// Context İPTAL EDİLEBİLİR — gönderimin ve sonuç yazımının aksine. İzin beklemenin
+// hiçbir yan etkisi yok, dolayısıyla SIGTERM beklemeyi kesmeli ve satır kuyruğa
+// dönmeli. Bu sayede DrainTimeout'un RateWaitMax'ı kapsaması gerekmiyor; yalnızca
+// LeaseDuration onu kapsıyor (satır beklerken lease altında).
+//
+// FAIL CLOSED: Redis'e ulaşılamazsa gönderim YAPILMAZ. Hata, reddedilmiş izinle aynı
+// muameleyi görüyor — yeniden denenir. "Hata hâlinde lease'i hemen geri ver" denseydi
+// Redis düştüğünde claim → hata → release → claim döngüsü milisaniye ölçeğinde
+// Postgres'i döverdi; burada beklemek jetonu sender'da tuttuğu için claimer
+// kendiliğinden duruyor ve backpressure'ı semafor sağlıyor.
+func (e *Engine) awaitPermit(
+	ctx context.Context, log *slog.Logger, notification *domain.Notification,
+) bool {
+	deadline := time.Now().Add(e.cfg.RateWaitMax)
+
+	var (
+		window  time.Duration
+		waits   int
+		errSeen bool
+	)
+
+	for {
+		decision, err := e.allowOnce(ctx, notification.Channel)
+
+		switch {
+		case err != nil:
+			// İlk hatada loglanır: her yeniden denemede loglamak, Redis düştüğünde
+			// log hacmini gönderim hacmiyle çarpardı.
+			if !errSeen {
+				errSeen = true
+
+				log.ErrorContext(ctx, "gönderim izni alınamadı, gönderim yapılmıyor",
+					slog.String("error", err.Error()))
+			}
+
+			window = grow(max(window, rateWaitFloor), rateWaitCeil)
+
+		case decision.OK:
+			if waits > 0 {
+				log.DebugContext(ctx, "gönderim izni alındı",
+					slog.Int("waits", waits))
+			}
+
+			return true
+
+		default:
+			// Reddedildi. İlk pencere sağlayıcının rehberinden gelir; sonra katlanır.
+			//
+			// RetryAfter'ı her turda doğrudan beklemek Redis'i döverdi: GCRA'nın
+			// değeri "bir sonraki izne kadar" (~10 ms) ve BEKLEYEN HERKES AYNI
+			// DEĞERİ ALIR. Kova boşken onlarca sender saniyede binlerce istek atar,
+			// karşılığında saniyede yalnızca rate kadar izin üretilir.
+			window = grow(max(window, max(decision.RetryAfter, rateWaitFloor)), rateWaitCeil)
+		}
+
+		waits++
+
+		if remaining := time.Until(deadline); remaining <= 0 {
+			log.WarnContext(ctx, "izin beklemesi aşıldı, iş kuyruğa geri veriliyor",
+				slog.String("rate_wait_max", e.cfg.RateWaitMax.String()),
+				slog.Int("waits", waits))
+
+			return false
+		}
+
+		if !sleep(ctx, jitter(window)) {
+			// Kapanış: bekleme kesiliyor, satır kuyruğa dönecek.
+			return false
+		}
+	}
+}
+
+// allowOnce, tek bir izin sorgusu yapar ve sorguyu kendi zaman aşımıyla sınırlar.
+//
+// Zaman aşımı olmadan takılı bir Redis tek çağrıda bütün bekleme bütçesini
+// tüketebilir (ölçüldü); böylece ne hata loglanır ne yeniden denenir.
+func (e *Engine) allowOnce(
+	ctx context.Context, channel domain.Channel,
+) (ratelimit.Decision, error) {
+	allowCtx, cancel := context.WithTimeout(ctx, rateAllowTimeout)
+	defer cancel()
+
+	return e.limiter.Allow(allowCtx, channel)
 }
 
 // send, sağlayıcı çağrısını yapar ve geçen süreyi döner.
