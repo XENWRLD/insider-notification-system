@@ -120,6 +120,7 @@ Modül yolu: `github.com/XENWRLD/insider-notification-system`
 | `cmd/api` | HTTP API process'i |
 | `cmd/worker` | Kanal havuzları, claim/retry/reaper (Adım 6) |
 | `cmd/mockprovider` | Ayarlanabilir hata oranlı sahte sağlayıcı (Adım 6) |
+| `internal/bootstrap` | Ortak açılış: havuzlar + bağımlılık bekleme (api ve worker) |
 | `internal/config` | Ortam değişkenlerinden yapılandırma |
 | `internal/domain` | Modeller, durum makinesi, validation |
 | `internal/httpapi` | Router, middleware, handler'lar |
