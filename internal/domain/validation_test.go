@@ -235,6 +235,58 @@ func TestEmailAndPushContentLimits(t *testing.T) {
 	require.Contains(t, fieldMessages(t, err), "content")
 }
 
+// TestWhitespaceOnlyContentRejected, yalnızca boşluktan oluşan içeriğin boş sayılmasını
+// ama kabul edilen içeriğin kırpılmadan saklanmasını sabitler.
+func TestWhitespaceOnlyContentRejected(t *testing.T) {
+	t.Parallel()
+
+	blanks := []struct {
+		name    string
+		content string
+	}{
+		{name: "boşluklar", content: "   "},
+		{name: "satır sonu ve tab", content: "\n\t"},
+	}
+
+	for _, test := range blanks {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, channel := range []string{"sms", "email", "push"} {
+				_, err := NewNotification(NewNotificationInput{
+					Channel: channel, Recipient: recipientFor(channel), Content: test.content,
+				})
+				require.Contains(t, fieldMessages(t, err), "content", "kanal: %s", channel)
+			}
+
+			// Kanal geçersizken çalışan dal da aynı kontrolü uygulamalı.
+			_, err := NewNotification(NewNotificationInput{
+				Channel: "fax", Recipient: "+905551234567", Content: test.content,
+			})
+			require.Contains(t, fieldMessages(t, err), "content")
+		})
+	}
+
+	// Kırpma yalnızca kontrol için: baştaki/sondaki boşluk gönderenin biçimlendirmesi
+	// olabilir, aynen saklanır.
+	notification, err := NewNotification(NewNotificationInput{
+		Channel: "sms", Recipient: "+905551234567", Content: "  Merhaba  ",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "  Merhaba  ", notification.Content)
+}
+
+func recipientFor(channel string) string {
+	switch channel {
+	case "email":
+		return "ali@example.com"
+	case "push":
+		return "token"
+	default:
+		return "+905551234567"
+	}
+}
+
 // TestValidationErrorIsUnwrappable, handler'ın errors.As ile alan hatalarına
 // ulaşabildiğini doğrular.
 func TestValidationErrorIsUnwrappable(t *testing.T) {

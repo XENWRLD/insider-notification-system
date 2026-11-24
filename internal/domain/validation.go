@@ -103,7 +103,7 @@ func NewNotification(in NewNotificationInput) (*Notification, error) {
 		if recipient == "" {
 			verr.add("recipient", "zorunlu")
 		}
-		if content == "" {
+		if strings.TrimSpace(content) == "" {
 			verr.add("content", "zorunlu")
 		}
 	}
@@ -169,7 +169,10 @@ func validateRecipient(verr *ValidationError, channel Channel, recipient string)
 
 // validateContent, içeriği kanalın kurallarına göre doğrular.
 func validateContent(verr *ValidationError, channel Channel, content string) {
-	if content == "" {
+	// Yalnızca boşluktan oluşan içerik de boş sayılır: alıcıya anlamsız bir mesaj
+	// gider. Kontrol kırpılmış kopya üzerinde yapılır, saklanan içerik değişmez —
+	// baştaki/sondaki boşluk gönderenin bilinçli biçimlendirmesi olabilir.
+	if strings.TrimSpace(content) == "" {
 		verr.add("content", "zorunlu")
 
 		return
