@@ -24,7 +24,10 @@ func newFilter(t *testing.T, in domain.ListFilterInput) domain.ListFilter {
 	return filter
 }
 
-// insertAttempt, elle bir deneme kaydı ekler (yazan kod Adım 6'da gelecek).
+// insertAttempt, elle bir deneme kaydı ekler.
+//
+// Üretimde bu satırları CompleteNotification yazıyor (Adım 6); okuma testleri
+// gönderim hattını kurmak zorunda kalmasın diye elle yazan bu yardımcı duruyor.
 func insertAttempt(
 	t *testing.T, pool *pgxpool.Pool, notificationID uuid.UUID, attemptNo, statusCode, durationMS int,
 ) {

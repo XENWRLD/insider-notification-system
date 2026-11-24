@@ -56,6 +56,30 @@ func (p Priority) Valid() bool {
 	}
 }
 
+// Rank, önceliğin sıra numarası: küçük olan önce çekilir.
+//
+// Değerler migration 000001'deki priority_rank generated kolonuyla **birebir aynı
+// kalmak zorunda**; iki kaynak ayrışırsa worker'ın Go tarafında sıraladığı grup
+// veritabanının seçtiği sıradan farklı olur. TestPriorityRankMatchesGeneratedColumn
+// bu eşitliği her koşuda doğrular.
+//
+// Neden Go'da da gerekiyor: claim sorgusu UPDATE ... RETURNING olduğu için dönen
+// satırların sırası garanti edilmez (sıra dış planın tarama sırasına göredir, CTE'nin
+// ORDER BY'ına göre değil) ve priority_rank okuma kolonları arasında yok.
+func (p Priority) Rank() int {
+	switch p {
+	case PriorityHigh:
+		return 1
+	case PriorityNormal:
+		return 2
+	case PriorityLow:
+		return 3
+	default:
+		// Tanınmayan değer en sona: geçersiz veri kuyruğun önünü kapatmasın.
+		return 4
+	}
+}
+
 // Notification, notifications tablosunun bir satırının karşılığı.
 //
 // Nullable kolonlar işaretçi (pointer) olarak tutulur: "değer yok" ile "sıfır değer"

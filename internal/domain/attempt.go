@@ -5,7 +5,7 @@ import "time"
 // Attempt, notification_attempts tablosunun bir satırı: tek bir gönderim denemesinin
 // tutanağı.
 //
-// Bu kayıtları yazan kod Adım 6-8'de gelecek; okuma tarafı şimdiden tam çalışıyor.
+// Kayıtları store.CompleteNotification yazar: durum güncellemesiyle aynı transaction'da.
 type Attempt struct {
 	AttemptNo int
 

@@ -172,13 +172,10 @@ func TestCancelNotificationLosesRaceAgainstClaim(t *testing.T) {
 	claimTx, err := pool.Begin(ctx)
 	require.NoError(t, err)
 
+	// Uygulamanın gerçek claim sorgusu kullanılıyor: testin dayandığı kilitleme
+	// davranışı ile worker'ın koşturduğu SQL ayrışmasın.
 	var claimedID uuid.UUID
-	require.NoError(t, claimTx.QueryRow(ctx, `
-		SELECT id FROM notifications
-		WHERE channel = 'sms' AND status IN ('pending', 'retrying')
-		ORDER BY priority_rank, available_at, id
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED`).Scan(&claimedID))
+	require.NoError(t, claimTx.QueryRow(ctx, claimSelectQuery, "sms", 1).Scan(&claimedID))
 	require.Equal(t, notification.ID, claimedID)
 
 	_, err = claimTx.Exec(ctx, `
