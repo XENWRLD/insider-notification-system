@@ -413,7 +413,7 @@ func TestDispatchAllReturnsUndispatchedWorkOnShutdown(t *testing.T) {
 	require.Equal(t, claimed, pending)
 }
 
-// TestHandBackLeasesReturnsClaimedWorkToQueue, kapanışta claim edilmiş ama hiç
+// TestReleaseLeasesReturnsClaimedWorkToQueue, kapanışta claim edilmiş ama hiç
 // denenmemiş işlerin kuyruğa geri verildiğini doğrular.
 //
 // "Worker restart'ta iş kaybı yok" kabulünün mekanizması bu: geri verilmezse satırlar
@@ -422,7 +422,7 @@ func TestDispatchAllReturnsUndispatchedWorkOnShutdown(t *testing.T) {
 // Ayrıca kritik bir ayrıntıyı sabitliyor: geri verme, ZATEN İPTAL EDİLMİŞ bir context
 // ile çağrıldığında da çalışmalı (context.WithoutCancel). Parent'ın çocuğu olsaydı
 // sorgu hiç gönderilmezdi.
-func TestHandBackLeasesReturnsClaimedWorkToQueue(t *testing.T) {
+func TestReleaseLeasesReturnsClaimedWorkToQueue(t *testing.T) {
 	t.Parallel()
 
 	queue := &stubQueue{}
@@ -435,7 +435,7 @@ func TestHandBackLeasesReturnsClaimedWorkToQueue(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	pool.handBackLeases(ctx, []*domain.Notification{first, second})
+	engine.releaseLeases(ctx, pool.logger, []*domain.Notification{first, second})
 
 	released := queue.releasedHolds()
 	require.Len(t, released, 1, "tek çağrıda hepsi geri verilmeli")
@@ -445,12 +445,12 @@ func TestHandBackLeasesReturnsClaimedWorkToQueue(t *testing.T) {
 	}, released[0], "her satır kendi token'ıyla eşlenmeli")
 }
 
-// TestHandBackLeasesSkipsRowsWithoutToken, token'sız satırın atlandığını doğrular.
+// TestReleaseLeasesSkipsRowsWithoutToken, token'sız satırın atlandığını doğrular.
 //
 // Claim her satıra token yazar; token'sız satır bir değişmez ihlali. Geri verme
 // sorgusu (id, lease_token) ikilisiyle eşleştiği için token'sız kayıt gönderilse
 // hiçbir satırı etkilemezdi — yine de sessiz kalınmıyor.
-func TestHandBackLeasesSkipsRowsWithoutToken(t *testing.T) {
+func TestReleaseLeasesSkipsRowsWithoutToken(t *testing.T) {
 	t.Parallel()
 
 	queue := &stubQueue{}
@@ -461,7 +461,7 @@ func TestHandBackLeasesSkipsRowsWithoutToken(t *testing.T) {
 	withoutToken := newTestNotification(domain.ChannelSMS, 1)
 	withoutToken.LeaseToken = nil
 
-	pool.handBackLeases(context.Background(),
+	engine.releaseLeases(context.Background(), pool.logger,
 		[]*domain.Notification{withToken, withoutToken})
 
 	released := queue.releasedHolds()
@@ -470,16 +470,16 @@ func TestHandBackLeasesSkipsRowsWithoutToken(t *testing.T) {
 	require.Equal(t, withToken.ID, released[0][0].ID)
 }
 
-// TestHandBackLeasesSkipsQueryWhenNothingPending, elde iş yokken veritabanına
+// TestReleaseLeasesSkipsQueryWhenNothingPending, elde iş yokken veritabanına
 // gidilmediğini doğrular: kapanışta boş havuz gereksiz sorgu atmasın.
-func TestHandBackLeasesSkipsQueryWhenNothingPending(t *testing.T) {
+func TestReleaseLeasesSkipsQueryWhenNothingPending(t *testing.T) {
 	t.Parallel()
 
 	queue := &stubQueue{}
 	engine := newTestEngine(t, testConfig(), queue, &stubSender{})
 	pool := newChannelPool(engine, domain.ChannelSMS)
 
-	pool.handBackLeases(context.Background(), nil)
+	engine.releaseLeases(context.Background(), pool.logger, nil)
 
 	require.Empty(t, queue.releasedHolds())
 }

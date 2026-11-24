@@ -75,6 +75,58 @@ func (e *Engine) send(
 	return resp, time.Since(started), err
 }
 
+// releaseLeases, claim edilmiş ama hiç denenmemiş işleri kuyruğa geri verir.
+//
+// İki çağıranı var: kapanışta dağıtılamayan işleri bırakan claimer, ve izin
+// alamadığı için gönderimden vazgeçen sender. İkisi de "satır bizde ama sağlayıcıya
+// hiç gitmedi" durumunda; ReleaseLeases bu yüzden attempt_count'u da geri alıyor.
+//
+// Taze context (WithoutCancel): çağıranın context'i kapanışta zaten iptal edilmiş
+// oluyor ve onun çocuğu anında ölerek geri vermeyi hiç çalıştırmazdı.
+func (e *Engine) releaseLeases(
+	ctx context.Context, log *slog.Logger, pending []*domain.Notification,
+) {
+	holds := make([]store.LeaseHold, 0, len(pending))
+
+	for _, notification := range pending {
+		if notification.LeaseToken == nil {
+			// Claim her satıra token yazar; buraya düşmek bir değişmez ihlali olurdu.
+			log.ErrorContext(ctx, "lease token'ı olmayan iş geri verilemedi",
+				slog.String("notification_id", notification.ID.String()))
+
+			continue
+		}
+
+		holds = append(holds, store.LeaseHold{
+			ID:    notification.ID,
+			Token: *notification.LeaseToken,
+		})
+	}
+
+	if len(holds) == 0 {
+		return
+	}
+
+	releaseCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), e.cfg.ResultTimeout)
+	defer cancel()
+
+	released, err := e.queue.ReleaseLeases(releaseCtx, holds)
+	if err != nil {
+		// Kaybedilmedi: lease süresi dolunca reaper aynı işi kurtarır. Yalnızca
+		// yeniden çekilmesi gecikir.
+		log.ErrorContext(ctx, "lease'ler geri verilemedi, reaper kurtaracak",
+			slog.Int("pending", len(holds)),
+			slog.String("error", err.Error()))
+
+		return
+	}
+
+	log.InfoContext(ctx, "işler kuyruğa geri verildi",
+		slog.Int64("released", released),
+		slog.Int("pending", len(holds)))
+}
+
 // writeResult, sonucu veritabanına yazar.
 func (e *Engine) writeResult(
 	ctx context.Context, log *slog.Logger, result store.NotificationResult,

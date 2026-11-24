@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
-	"github.com/XENWRLD/insider-notification-system/internal/store"
 )
 
 // channelPool, tek bir kanalın iş çekme ve gönderme havuzu.
@@ -161,7 +160,7 @@ func (p *channelPool) claimLoop(ctx context.Context) {
 			// Kapanış dağıtımın ortasında geldi: elde kalan satırların lease'i geri
 			// verilir, böylece yeniden başlayan worker onları reaper'ı beklemeden alır.
 			p.releaseTokens(len(undispatched))
-			p.handBackLeases(ctx, undispatched)
+			p.engine.releaseLeases(ctx, p.logger, undispatched)
 
 			return
 		}
@@ -220,52 +219,6 @@ func (p *channelPool) dispatchAll(
 	}
 
 	return nil
-}
-
-// handBackLeases, claim edilmiş ama hiç denenmemiş işleri kuyruğa geri verir.
-//
-// Taze context: çağıranın context'i zaten iptal edilmiş olduğu için onun çocuğu
-// anında ölür ve geri verme hiç çalışmazdı.
-func (p *channelPool) handBackLeases(ctx context.Context, pending []*domain.Notification) {
-	holds := make([]store.LeaseHold, 0, len(pending))
-
-	for _, notification := range pending {
-		if notification.LeaseToken == nil {
-			// Claim her satıra token yazar; buraya düşmek bir değişmez ihlali olurdu.
-			p.logger.ErrorContext(ctx, "lease token'ı olmayan iş geri verilemedi",
-				slog.String("notification_id", notification.ID.String()))
-
-			continue
-		}
-
-		holds = append(holds, store.LeaseHold{
-			ID:    notification.ID,
-			Token: *notification.LeaseToken,
-		})
-	}
-
-	if len(holds) == 0 {
-		return
-	}
-
-	releaseCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx), p.engine.cfg.ResultTimeout)
-	defer cancel()
-
-	released, err := p.engine.queue.ReleaseLeases(releaseCtx, holds)
-	if err != nil {
-		// Kaybedilmedi: lease süresi dolunca reaper aynı işi kurtarır. Yalnızca
-		// yeniden çekilmesi gecikir.
-		p.logger.ErrorContext(ctx, "lease'ler geri verilemedi, reaper kurtaracak",
-			slog.Int("pending", len(holds)),
-			slog.String("error", err.Error()))
-
-		return
-	}
-
-	p.logger.InfoContext(ctx, "kapanışta işler kuyruğa geri verildi",
-		slog.Int64("released", released),
-		slog.Int("pending", len(holds)))
 }
 
 // sendLoop, dağıtım kanalından iş alıp gönderir.
