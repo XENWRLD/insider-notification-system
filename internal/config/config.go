@@ -40,6 +40,39 @@ type Config struct {
 	// IdempotencyTTL, saklanan idempotency cevaplarının geçerlilik süresi.
 	// Süresi dolmuş bir anahtar yeniden kullanılabilir hâle gelir.
 	IdempotencyTTL time.Duration
+
+	// --- Worker (cmd/worker) ---
+	//
+	// API bu alanları okumaz. Tek Config'de duruyorlar ki "ortam değişkenleri tek
+	// yerden okunur" kuralı bozulmasın; worker'a özel çapraz alan tutarlılığı
+	// (lease penceresi gibi) worker.New içinde doğrulanıyor.
+
+	// WorkerConcurrency, kanal başına eşzamanlı gönderim sayısı ve aynı zamanda
+	// bir worker'ın tutabileceği en fazla lease sayısı.
+	WorkerConcurrency int
+	// WorkerClaimBatchSize, tek claim sorgusunda istenen en fazla satır.
+	WorkerClaimBatchSize int
+	// WorkerLeaseDuration, claim edilen satırın sahiplik süresi.
+	WorkerLeaseDuration time.Duration
+	// WorkerPollMinInterval/MaxInterval, boş kuyrukta bekleme aralığı.
+	WorkerPollMinInterval time.Duration
+	WorkerPollMaxInterval time.Duration
+	// WorkerProviderTimeout, tek sağlayıcı çağrısının üst sınırı.
+	WorkerProviderTimeout time.Duration
+	// WorkerResultTimeout, sonuç yazımının üst sınırı.
+	WorkerResultTimeout time.Duration
+	// WorkerDrainTimeout, kapanışta uçan gönderimler için beklenen süre.
+	WorkerDrainTimeout time.Duration
+	// WorkerRetryDelay, Adım 6'nın geçici sabit retry gecikmesi.
+	WorkerRetryDelay time.Duration
+	// WorkerReaperInterval/BatchSize, lease kurtarma döngüsü.
+	WorkerReaperInterval  time.Duration
+	WorkerReaperBatchSize int
+	// WorkerDBMaxConns, worker'ın bağlantı havuzu boyutu.
+	WorkerDBMaxConns int
+	// IdempotencyCleanupInterval/Batch, süresi dolmuş anahtarların temizliği.
+	IdempotencyCleanupInterval time.Duration
+	IdempotencyCleanupBatch    int
 }
 
 // Load, ortam değişkenlerini okur ve doğrular.
@@ -94,6 +127,48 @@ func Load() (Config, error) {
 		problems = append(problems, err.Error())
 	}
 	cfg.BodyLimitBatch = bodyLimitBatch
+
+	for _, field := range []struct {
+		key      string
+		target   *time.Duration
+		fallback time.Duration
+	}{
+		{"WORKER_LEASE_DURATION", &cfg.WorkerLeaseDuration, 60 * time.Second},
+		{"WORKER_POLL_MIN_INTERVAL", &cfg.WorkerPollMinInterval, 50 * time.Millisecond},
+		{"WORKER_POLL_MAX_INTERVAL", &cfg.WorkerPollMaxInterval, 2 * time.Second},
+		{"WORKER_PROVIDER_TIMEOUT", &cfg.WorkerProviderTimeout, 10 * time.Second},
+		{"WORKER_RESULT_TIMEOUT", &cfg.WorkerResultTimeout, 3 * time.Second},
+		{"WORKER_DRAIN_TIMEOUT", &cfg.WorkerDrainTimeout, 20 * time.Second},
+		{"WORKER_RETRY_DELAY", &cfg.WorkerRetryDelay, 5 * time.Second},
+		{"WORKER_REAPER_INTERVAL", &cfg.WorkerReaperInterval, 10 * time.Second},
+		{"IDEMPOTENCY_CLEANUP_INTERVAL", &cfg.IdempotencyCleanupInterval, time.Hour},
+	} {
+		value, err := envDuration(field.key, field.fallback)
+		if err != nil {
+			problems = append(problems, err.Error())
+		}
+
+		*field.target = value
+	}
+
+	for _, field := range []struct {
+		key      string
+		target   *int
+		fallback int
+	}{
+		{"WORKER_CONCURRENCY", &cfg.WorkerConcurrency, 20},
+		{"WORKER_CLAIM_BATCH_SIZE", &cfg.WorkerClaimBatchSize, 20},
+		{"WORKER_REAPER_BATCH_SIZE", &cfg.WorkerReaperBatchSize, 100},
+		{"WORKER_DB_MAX_CONNS", &cfg.WorkerDBMaxConns, 16},
+		{"IDEMPOTENCY_CLEANUP_BATCH", &cfg.IdempotencyCleanupBatch, 1000},
+	} {
+		value, err := envInt(field.key, field.fallback)
+		if err != nil {
+			problems = append(problems, err.Error())
+		}
+
+		*field.target = value
+	}
 
 	if !isKnownLogLevel(cfg.LogLevel) {
 		problems = append(problems, "LOG_LEVEL geçersiz (debug|info|warn|error): "+cfg.LogLevel)

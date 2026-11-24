@@ -118,3 +118,87 @@ func TestLoadRejectsInvalidRequestLimits(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadAppliesWorkerDefaults, worker ayarlarının varsayılanlarını sabitler.
+//
+// Varsayılanlar birbirine bağlı: WORKER_CONCURRENCY tutulan lease sayısının üst
+// sınırı ve lease süresi (PROVIDER + RESULT) penceresinin iki katını kapsamalı.
+// worker.New bu tutarlılığı ayrıca doğruluyor, buradaki test değerlerin kaymadığını
+// garanti ediyor.
+func TestLoadAppliesWorkerDefaults(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.Equal(t, 20, cfg.WorkerConcurrency)
+	require.Equal(t, 20, cfg.WorkerClaimBatchSize)
+	require.Equal(t, 60*time.Second, cfg.WorkerLeaseDuration)
+	require.Equal(t, 50*time.Millisecond, cfg.WorkerPollMinInterval)
+	require.Equal(t, 2*time.Second, cfg.WorkerPollMaxInterval)
+	require.Equal(t, 10*time.Second, cfg.WorkerProviderTimeout)
+	require.Equal(t, 3*time.Second, cfg.WorkerResultTimeout)
+	require.Equal(t, 20*time.Second, cfg.WorkerDrainTimeout)
+	require.Equal(t, 5*time.Second, cfg.WorkerRetryDelay)
+	require.Equal(t, 10*time.Second, cfg.WorkerReaperInterval)
+	require.Equal(t, 100, cfg.WorkerReaperBatchSize)
+	require.Equal(t, 16, cfg.WorkerDBMaxConns)
+	require.Equal(t, time.Hour, cfg.IdempotencyCleanupInterval)
+	require.Equal(t, 1000, cfg.IdempotencyCleanupBatch)
+
+	// Varsayılanlar worker.New'in şart koştuğu eşitsizlikleri sağlamalı.
+	window := cfg.WorkerProviderTimeout + cfg.WorkerResultTimeout
+	require.GreaterOrEqual(t, cfg.WorkerLeaseDuration, 2*window,
+		"varsayılan lease, gönderim penceresinin iki katını kapsamalı")
+	require.GreaterOrEqual(t, cfg.WorkerDrainTimeout, window,
+		"varsayılan kapanış süresi gönderim penceresini kapsamalı")
+}
+
+// TestLoadReadsWorkerOverrides, worker değişkenlerinin okunduğunu doğrular.
+func TestLoadReadsWorkerOverrides(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("WORKER_CONCURRENCY", "8")
+	t.Setenv("WORKER_CLAIM_BATCH_SIZE", "50")
+	t.Setenv("WORKER_LEASE_DURATION", "90s")
+	t.Setenv("WORKER_DRAIN_TIMEOUT", "45s")
+	t.Setenv("WORKER_DB_MAX_CONNS", "32")
+	t.Setenv("IDEMPOTENCY_CLEANUP_BATCH", "500")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.Equal(t, 8, cfg.WorkerConcurrency)
+	require.Equal(t, 50, cfg.WorkerClaimBatchSize)
+	require.Equal(t, 90*time.Second, cfg.WorkerLeaseDuration)
+	require.Equal(t, 45*time.Second, cfg.WorkerDrainTimeout)
+	require.Equal(t, 32, cfg.WorkerDBMaxConns)
+	require.Equal(t, 500, cfg.IdempotencyCleanupBatch)
+}
+
+// TestLoadRejectsInvalidWorkerValues, geçersiz worker ayarının tek tek değil topluca
+// yakalandığını doğrular.
+func TestLoadRejectsInvalidWorkerValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "eşzamanlılık sayı değil", key: "WORKER_CONCURRENCY", value: "yirmi"},
+		{name: "eşzamanlılık sıfır", key: "WORKER_CONCURRENCY", value: "0"},
+		{name: "parti negatif", key: "WORKER_CLAIM_BATCH_SIZE", value: "-5"},
+		{name: "lease geçersiz süre", key: "WORKER_LEASE_DURATION", value: "bir dakika"},
+		{name: "drain negatif", key: "WORKER_DRAIN_TIMEOUT", value: "-20s"},
+		{name: "temizlik partisi sıfır", key: "IDEMPOTENCY_CLEANUP_BATCH", value: "0"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(test.key, test.value)
+
+			_, err := Load()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), test.key)
+		})
+	}
+}

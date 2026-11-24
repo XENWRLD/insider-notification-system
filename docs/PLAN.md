@@ -238,13 +238,48 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
 **Gün sonu kontrolü:** `docker compose up` çalışıyor; curl ile oluştur / listele / iptal et.
 
 ### 2. Gün — İşleme motoru
-- [ ] **Adım 6 — Worker motoru:** kanal havuzları, SKIP LOCKED claim (20'li), lease + token, reaper, provider client, mock provider, graceful shutdown → `feat: implement worker engine with leases and recovery`
-  - [ ] Idempotency TTL temizliğini reaper'ın yanına ekle:
+- [x] **Adım 6 — Worker motoru:** kanal havuzları, SKIP LOCKED claim (20'li), lease + token, reaper, provider client, mock provider, graceful shutdown → `feat: implement worker engine with leases and recovery`
+      *(adım dört commit'e bölündü: `refactor: extract bootstrap helpers for api and worker`,
+      `feat: add claim, result and reaper queries`, `feat: add provider client and mock provider`,
+      `feat: implement worker engine with leases and recovery`)*
+  - [x] Idempotency TTL temizliğini reaper'ın yanına ekle:
         `store.DeleteExpiredIdempotencyKeys` Adım 4'te yazıldı ve test edildi,
-        yalnızca periyodik çağıran eksik (API değil worker koşturmalı)
+        yalnızca periyodik çağıran eksikti (`internal/worker/janitor.go`, API değil worker koşturuyor)
+  - [x] **Yeni migration yok:** Adım 2'nin `notifications_claim_idx`,
+        `notifications_lease_expiry_idx` ve lease CHECK kısıtları olduğu gibi kullanıldı
+  - [x] **Claimer boştaki sender kadar iş çeker** (jeton semaforu): tamponlu dağıtım
+        kuyruğu 40 satırın lease'ini tutup en kötü pencereyi 52 sn'ye çıkarıyordu
+        (lease 60 sn) → çift gönderim riski. Jetonla sınır `WORKER_CONCURRENCY`,
+        pencere tek dalga (provider + sonuç yazımı). `ClaimBatchSize` lease hesabına girmiyor
+  - [x] **Lease yenileme yok:** en kötü pencere kontrolümüzde; `worker.New` açılışta
+        `lease >= 2 × (provider + result)` ve `drain >= provider + result` eşitsizliklerini zorluyor
+  - [x] **Reaper hakkı tükenen satırı `failed` yapar:** claim'deki
+        `attempt_count < max_attempts` koşuluyla birlikte zorunlu — biri olmadan satır
+        sonsuz döner, ikisi eksik olunca sonsuza kadar `retrying`'de gömülü kalır
+  - [x] **Kapanışa dayanıklı context** (`context.WithoutCancel`): uçan gönderim ve
+        sonuç yazımı SIGTERM ile kesilmez; kesilse gönderilmiş mesajın satırı
+        `processing`'de kalıp reaper tarafından yeniden gönderilirdi
+  - [x] **Geçici hatalar errgroup'a döndürülmez:** loglanıp backoff ile yeniden denenir,
+        aksi hâlde tek saniyelik bir DB kopması worker'ı crash-loop'a sokardı
+  - [x] **2xx + `DecodeError` → `sent`:** `DecodeError` yalnızca başarılı durum
+        kodlarında üretiliyor, yani sağlayıcı kabul etmiş. `retrying` yapmak çift
+        gönderim olurdu (gövdesi JSON olmayan sağlayıcıda her mesaj 5 kez giderdi)
+  - [x] **Başarı = her 2xx, yalnızca 202 değil:** webhook.site 200 dönüyor
 - [ ] **Adım 7 — Rate limit + öncelik:** Redis jeton kovası, `--scale worker=3` demosu → `feat: add distributed rate limiting and priority ordering`
+  - [ ] Rate limit bekleme süresi lease süresi içinde geçiyor; jeton claim'den önce mi
+        alınacak, yoksa bekleme süresi sınırlanıp lease hesabına mı eklenecek? Karar Adım 7'de.
 - [ ] **Adım 8 — Retry + hata yönetimi:** sınıflandırma, backoff + jitter, attempts tablosu, circuit breaker → `feat: implement retry policy and circuit breaker`
+  - [ ] Yalnızca `internal/worker/classify.go` gövdesi değişecek (Adım 6 dikişi):
+        400/422 → hemen `failed`; 429 → `provider.StatusError.RetryAfter`;
+        5xx/timeout → `min(2s × 2^(n-1), 5dk)` + full jitter. `attempts` tablosu
+        Adım 6'da zaten yazılıyor, sabit 5 sn gecikme oradan kalkacak
+  - [ ] Claim sorgusu iptal edilebilir ctx ile çalışıyor; kapanış tam claim sırasında
+        gelirse satırlar reaper'a kadar (~60 sn) bekler. Claim'i de kapanıştan muaf
+        tutmak mı, yoksa lease süresini bu pencereye göre mi ayarlamak gerekiyor?
 - [ ] **Adım 9 — Gözlemlenebilirlik:** `/metrics`, uçtan uca correlation ID, `/health/ready` → `feat: add metrics, structured logging and health checks`
+  - [ ] Worker metrikleri (gönderim gecikmesi, sent/failed sayaçları) worker process'inde
+        oluşuyor: worker'a ayrı portta /metrics mi açılacak, yoksa API metrikleri DB'den
+        (notifications + notification_attempts.duration_ms) mi hesaplayacak? Karar Adım 9'da.
 - [ ] **Motor testleri:** çift claim yok, lease recovery, retry → `test: add worker integration tests`
 
 **Gün sonu kontrolü:** 1000 SMS ≈ 10 sn; worker restart'ta iş kaybı yok; %30 hata oranında retry görülüyor; webhook.site'ta 3 kanal doğru JSON.
@@ -266,6 +301,10 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         güvenli bir tercihtir."
   - [ ] README'de batch sınırları: "1000 kayıt ve 16 MB sınırı birlikte uygulanır;
         Türkçe/emoji içerikli çok uzun e-posta batch'leri byte sınırına önce takılabilir."
+  - [ ] README'de kapanışta geri verilen iş: `ReleaseLeases` ile kuyruğa dönen hiç
+        denenmemiş satır `retrying` + `attempt_count = 0` görünür. `processing → pending`
+        durum makinesinde yasak olduğu için satır `retrying`'e düşer, ama denemesi
+        sayılmadığı için sayaç sıfıra geri alınır.
   - [ ] README'de cursor sözleşmesi: imleç **opaktır**, yalnızca önceki yanıttan gelen
         `next_cursor` geri verilmelidir; elle kurulmamalı (iç yapı değişebilir)
   - [ ] README'de tarih aralığı: `[from, to)` yarı açık; `to` hariç olduğu için ardışık

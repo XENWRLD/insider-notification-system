@@ -1,0 +1,289 @@
+package worker
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/XENWRLD/insider-notification-system/internal/domain"
+	"github.com/XENWRLD/insider-notification-system/internal/store"
+)
+
+// channelPool, tek bir kanalın iş çekme ve gönderme havuzu.
+//
+// Yapı: 1 claimer + Concurrency kadar sender + Concurrency kapasiteli jeton semaforu.
+//
+// Jeton semaforu neden var: claimer yalnızca BOŞTAKİ sender kadar iş çeker. Tamponlu
+// bir dağıtım kuyruğu olsaydı claimer öne geçip bir sonraki grubu da claim eder,
+// worker kanal başına 2×ClaimBatchSize satırın lease'ini tutar ve son satır sırada
+// beklerken lease süresi dolardı — reaper satırı devralır, mesaj ikinci kez gider.
+// Jetonla tutulan lease sayısı her zaman ≤ Concurrency ve bir satırın claim'den
+// sonuca kadar geçirdiği süre tek dalga (sağlayıcı + sonuç yazımı) kadar.
+//
+// Dağıtım kanalı TAMPONSUZ: bir satır ya claimer'ın elinde ya da bir sender'da olur,
+// üçüncü bir yer yok. Kapanışta claimer elindekileri geri verir, sender'lar
+// aldıklarını bitirir; tamponda unutulmuş satır kalamaz. Jeton zaten claimer'ı
+// sınırladığı için tamponsuzluk verimden bir şey götürmüyor: claimer jeton almışsa
+// karşıda onu bırakmış, alıma dönen bir sender vardır.
+type channelPool struct {
+	engine  *Engine
+	channel domain.Channel
+	logger  *slog.Logger
+
+	// sem, boş jetonları tutar. Alma: <-sem, bırakma: sem <- struct{}{}.
+	// len(sem) o anda boşta olan sender sayısıdır.
+	sem chan struct{}
+
+	dispatch chan *domain.Notification
+}
+
+func newChannelPool(engine *Engine, channel domain.Channel) *channelPool {
+	sem := make(chan struct{}, engine.cfg.Concurrency)
+	for range engine.cfg.Concurrency {
+		sem <- struct{}{}
+	}
+
+	return &channelPool{
+		engine:   engine,
+		channel:  channel,
+		logger:   engine.logger.With(slog.String("channel", string(channel))),
+		sem:      sem,
+		dispatch: make(chan *domain.Notification),
+	}
+}
+
+// run, havuzu çalıştırır ve context iptal edilip tüm gönderimler bitene kadar bloklar.
+func (p *channelPool) run(ctx context.Context) {
+	var senders sync.WaitGroup
+
+	senders.Add(p.engine.cfg.Concurrency)
+
+	for range p.engine.cfg.Concurrency {
+		go func() {
+			defer senders.Done()
+
+			p.sendLoop(ctx)
+		}()
+	}
+
+	// Claimer kapanışta önce durur; sender'lar ellerindeki işi bitirir.
+	p.claimLoop(ctx)
+
+	// Dağıtım kanalı kapanınca sender'lar döngüden çıkar; ellerindeki gönderim
+	// kapanışa dayanıklı context ile çalıştığı için kesilmez, biter.
+	close(p.dispatch)
+	p.waitForSenders(ctx, &senders)
+
+	p.logger.InfoContext(ctx, "kanal havuzu kapandı")
+}
+
+// waitForSenders, uçan gönderimlerin bitmesini bekler.
+//
+// Bekleme kesilmiyor, yalnızca uzarsa uyarı loglanıyor: erken dönmek main'deki
+// pool.Close()'un uçan sonuç yazımlarının altından havuzu çekmesi demek olurdu ve
+// başarıyla gönderilmiş satırlar processing'de kalıp reaper tarafından yeniden
+// gönderilirdi. Süre zaten yapıca sınırlı — Config.validate, DrainTimeout'un
+// sağlayıcı + sonuç yazımı penceresini kapsamasını şart koşuyor.
+func (p *channelPool) waitForSenders(ctx context.Context, senders *sync.WaitGroup) {
+	done := make(chan struct{})
+
+	go func() {
+		senders.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(p.engine.cfg.DrainTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+		p.logger.WarnContext(ctx, "kapanış süresi aşıldı, uçan gönderimler hâlâ bekleniyor",
+			slog.String("drain_timeout", p.engine.cfg.DrainTimeout.String()),
+			slog.Int("in_flight", p.engine.cfg.Concurrency-len(p.sem)))
+	}
+
+	<-done
+}
+
+// claimLoop, iş çekip sender'lara dağıtır.
+func (p *channelPool) claimLoop(ctx context.Context) {
+	poll := newBackoff(p.engine.cfg.PollMinInterval, p.engine.cfg.PollMaxInterval)
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		tokens := p.acquireTokens(ctx)
+		if tokens == 0 {
+			// Yalnızca kapanışta olur: jeton beklerken iptal geldi.
+			return
+		}
+
+		claimed, err := p.engine.queue.ClaimNotifications(
+			ctx, p.channel, tokens, p.engine.cfg.LeaseDuration)
+		if err != nil {
+			// Jetonlar BEKLEMEDEN ÖNCE geri veriliyor: aksi hâlde her hatalı turda
+			// semafordan jeton sızar ve havuz zamanla sessizce durur.
+			p.releaseTokens(tokens)
+
+			// Hata döndürülmüyor: geçici bir veritabanı kopması bütün worker'ı
+			// düşürmemeli. Loglanıp backoff ile yeniden denenir.
+			p.logger.ErrorContext(ctx, "iş çekilemedi, yeniden denenecek",
+				slog.String("error", err.Error()))
+
+			if !poll.wait(ctx) {
+				return
+			}
+
+			continue
+		}
+
+		// Kuyrukta istediğimizden az iş vardı: kullanılmayan jetonlar geri veriliyor.
+		if unused := tokens - len(claimed); unused > 0 {
+			p.releaseTokens(unused)
+		}
+
+		if len(claimed) == 0 {
+			if !poll.wait(ctx) {
+				return
+			}
+
+			continue
+		}
+
+		poll.reset()
+
+		if undispatched := p.dispatchAll(ctx, claimed); len(undispatched) > 0 {
+			// Kapanış dağıtımın ortasında geldi: elde kalan satırların lease'i geri
+			// verilir, böylece yeniden başlayan worker onları reaper'ı beklemeden alır.
+			p.releaseTokens(len(undispatched))
+			p.handBackLeases(ctx, undispatched)
+
+			return
+		}
+	}
+}
+
+// acquireTokens, en az bir, en fazla ClaimBatchSize kadar jeton toplar.
+//
+// İlk jeton için beklenir (iş yoksa boşa dönmenin anlamı yok), kalanı bloklamadan
+// alınır: böylece claim sorgusu "o anda gerçekten boş olan sender sayısı" kadar satır
+// ister. Kapanışta 0 döner.
+func (p *channelPool) acquireTokens(ctx context.Context) int {
+	select {
+	case <-ctx.Done():
+		return 0
+	case <-p.sem:
+	}
+
+	tokens := 1
+
+	for tokens < p.engine.cfg.ClaimBatchSize {
+		select {
+		case <-p.sem:
+			tokens++
+		default:
+			return tokens
+		}
+	}
+
+	return tokens
+}
+
+// releaseTokens, kullanılmayan jetonları semafora geri verir.
+//
+// Semafor kapasitesi sabit ve bırakılan jeton sayısı her zaman alınandan fazla
+// olamadığı için bu gönderim bloklanamaz.
+func (p *channelPool) releaseTokens(count int) {
+	for range count {
+		p.sem <- struct{}{}
+	}
+}
+
+// dispatchAll, işleri sender'lara verir ve dağıtılamayanları döner.
+//
+// Dağıtılan her satırın jetonu sender'a geçer ve sonuç yazıldıktan sonra onun
+// tarafından bırakılır; dağıtılamayanların jetonu çağıranda kalır.
+func (p *channelPool) dispatchAll(
+	ctx context.Context, claimed []*domain.Notification,
+) []*domain.Notification {
+	for index, notification := range claimed {
+		select {
+		case <-ctx.Done():
+			return claimed[index:]
+		case p.dispatch <- notification:
+		}
+	}
+
+	return nil
+}
+
+// handBackLeases, claim edilmiş ama hiç denenmemiş işleri kuyruğa geri verir.
+//
+// Taze context: çağıranın context'i zaten iptal edilmiş olduğu için onun çocuğu
+// anında ölür ve geri verme hiç çalışmazdı.
+func (p *channelPool) handBackLeases(ctx context.Context, pending []*domain.Notification) {
+	holds := make([]store.LeaseHold, 0, len(pending))
+
+	for _, notification := range pending {
+		if notification.LeaseToken == nil {
+			// Claim her satıra token yazar; buraya düşmek bir değişmez ihlali olurdu.
+			p.logger.ErrorContext(ctx, "lease token'ı olmayan iş geri verilemedi",
+				slog.String("notification_id", notification.ID.String()))
+
+			continue
+		}
+
+		holds = append(holds, store.LeaseHold{
+			ID:    notification.ID,
+			Token: *notification.LeaseToken,
+		})
+	}
+
+	if len(holds) == 0 {
+		return
+	}
+
+	releaseCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), p.engine.cfg.ResultTimeout)
+	defer cancel()
+
+	released, err := p.engine.queue.ReleaseLeases(releaseCtx, holds)
+	if err != nil {
+		// Kaybedilmedi: lease süresi dolunca reaper aynı işi kurtarır. Yalnızca
+		// yeniden çekilmesi gecikir.
+		p.logger.ErrorContext(ctx, "lease'ler geri verilemedi, reaper kurtaracak",
+			slog.Int("pending", len(holds)),
+			slog.String("error", err.Error()))
+
+		return
+	}
+
+	p.logger.InfoContext(ctx, "kapanışta işler kuyruğa geri verildi",
+		slog.Int64("released", released),
+		slog.Int("pending", len(holds)))
+}
+
+// sendLoop, dağıtım kanalından iş alıp gönderir.
+func (p *channelPool) sendLoop(ctx context.Context) {
+	for notification := range p.dispatch {
+		p.engine.handle(ctx, notification)
+
+		// Jeton gönderim VE sonuç yazımı bittikten sonra bırakılır: erken bırakmak
+		// claimer'ın hâlâ işlenen bir satır için yeni iş çekmesine yol açardı.
+		p.sem <- struct{}{}
+	}
+}
+
+// durationMS, süreyi veritabanına yazılacak milisaniyeye çevirir.
+func durationMS(elapsed time.Duration) int {
+	if elapsed <= 0 {
+		return 0
+	}
+
+	return int(elapsed.Milliseconds())
+}

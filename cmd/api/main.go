@@ -27,6 +27,11 @@ const (
 	// serviceName, logların kaynağını ayırt etmek için kullanılır.
 	serviceName = "api"
 
+	// apiDBMaxConns 0: API pgx'in varsayılan havuz boyutunu kullanır. Burada
+	// ölçülmüş bir ihtiyaç yok — istekler kısa sorgular yapıyor ve gönderim işini
+	// worker üstleniyor. Gerekirse Adım 9'da ölçülerek ayarlanır.
+	apiDBMaxConns = 0
+
 	// HTTP sunucu zaman aşımları açıkça verilir: Go'nun varsayılanı sınırsızdır ve
 	// yavaş istemciler bağlantıları süresiz tutabilir.
 	readHeaderTimeout = 5 * time.Second
@@ -58,7 +63,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := bootstrap.OpenPostgres(ctx, logger, cfg.DatabaseURL)
+	pool, err := bootstrap.OpenPostgres(ctx, logger, cfg.DatabaseURL, apiDBMaxConns)
 	if err != nil {
 		return err
 	}

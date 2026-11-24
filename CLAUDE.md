@@ -14,15 +14,21 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   Adım 2 (şema: 3 migration, 4 index, `migrate` servisi, testcontainers testleri),
   Adım 3 (domain + store + `POST /api/v1/notifications`, API sözleşmesi),
   Adım 4 (batch + idempotency: CopyFrom, claim-first transaction, uç başına gövde sınırı),
-  Adım 5 (okuma uçları: `GET {id}`, cursor listeleme, batch özeti, atomik iptal)
-- **Sıradaki:** Adım 6 — worker motoru: kanal havuzları, `SKIP LOCKED` claim (20'li),
-  lease + token, reaper, provider client, mock provider, graceful shutdown.
-  Ayrıca `store.DeleteExpiredIdempotencyKeys` periyodik çağrısı reaper'ın yanına eklenecek
-- **Henüz boş** (`.gitkeep`): `internal/{worker,provider,ratelimit}`, `cmd/worker`,
-  `cmd/mockprovider`, `api`, `deploy`, `loadtest`
+  Adım 5 (okuma uçları: `GET {id}`, cursor listeleme, batch özeti, atomik iptal),
+  Adım 6 (worker motoru: `internal/bootstrap`, claim/result/reaper sorguları,
+  provider client + mock provider, kanal havuzları + jeton semaforu, reaper, janitor,
+  `cmd/worker`; dört commit)
+- **Sıradaki:** Adım 7 — rate limit + öncelik: Redis jeton kovası (`internal/ratelimit`),
+  kanal başına global 100 msg/sn, `--scale worker=3` demosu, starvation/aging.
+  PLAN §8'de Adım 7'ye yazılan açık soru: rate limit beklemesi lease süresi içinde
+  geçiyor; jeton claim'den önce mi alınacak?
+- **Henüz boş** (`.gitkeep`): `internal/ratelimit`, `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
-  `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`
-  ve `docker compose ps -a` → `migrate` servisi `Exited (0)`, `api` `Up (healthy)`
+  `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`,
+  `curl localhost:8081/health/live` → `{"status":"alive"}` ve `docker compose ps -a` →
+  `migrate` `Exited (0)`, `api`/`mockprovider` `Up (healthy)`, `worker` `Up`.
+  Uçtan uca: bildirim oluştur → 2 sn sonra `status=sent`, `attempts[0]` dolu,
+  `docker compose logs worker | grep <correlation-id>` satırı bulur
 
 ### Şema notları (Adım 2)
 
@@ -111,6 +117,50 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   kalıbı pgx statement cache + generic plan altında cursor koşulunu `Index Cond` yerine
   `Filter`'a düşürüyor. Plan `TestListQueryUsesCursorIndex` ile testte doğrulanıyor.
 
+### Worker motoru (Adım 6'da sabitlendi)
+
+- **Kanal başına havuz:** 1 claimer + `WORKER_CONCURRENCY` sender + jeton semaforu.
+  SMS tıkanınca e-posta etkilenmez; izolasyon yapısal.
+- **Claimer boştaki sender kadar iş çeker.** Jeton semaforu (`chan struct{}`, önceden
+  dolu; `len(sem)` = boşta sender) claim limitini belirler. Sonuç: tutulan lease
+  **her zaman ≤ `WORKER_CONCURRENCY`** ve bir satırın claim→sonuç penceresi **tek dalga**
+  (`ProviderTimeout + ResultTimeout`). `ClaimBatchSize` lease hesabına **girmez**.
+- **Dağıtım kanalı tamponsuz:** bir satır ya claimer'ın elinde ya bir sender'da; üçüncü
+  yer yok. Kapanışta hangi satırın geri verileceği bu yüzden kesin.
+- **Jeton muhasebesi:** dağıtılan jetonu sender (sonuç yazımından **sonra**) bırakır,
+  dağıtılmayanı claimer. Kullanılmayan jetonlar ve hata hâlinde tümü **backoff
+  beklemesinden ÖNCE** geri verilir — aksi hâlde tur başına sızar ve worker sessizce durur.
+- **Lease sabit 60 sn, yenileme yok.** `worker.New` açılışta iki eşitsizliği zorlar:
+  `LeaseDuration >= 2 × (ProviderTimeout + ResultTimeout)` ve
+  `DrainTimeout >= ProviderTimeout + ResultTimeout`. Hata mesajı gereken sayıyı söyler.
+- **`context.WithoutCancel`:** uçan sağlayıcı çağrısı ve sonuç yazımı SIGTERM ile
+  kesilmez. Sonuç yazımını iptal etmek, gönderilmiş mesajın satırını `processing`'de
+  bırakıp reaper'a yeniden göndertmek olurdu. `pool.Close()` `Run` döndükten sonra çalışır.
+- **Geçici hatalar errgroup'a döndürülmez** (claim/sonuç/reaper/janitor): loglanır ve
+  backoff ile yeniden denenir. Döndürülse tek saniyelik bir DB kopması crash-loop yapardı.
+- **`attempt_count` claim anında artar**, yalnızca `ReleaseLeases` azaltır (sağlayıcı hiç
+  çağrılmadı). Deneme kaydını **yalnızca** `CompleteNotification` yazar; bu değişmez
+  sayesinde `attempt_no` çakışması imkânsız.
+- **Sonuç + deneme kaydı tek statement** (`WITH upd AS (UPDATE ... RETURNING) INSERT ...`),
+  `lease_token` koşullu. Lease kaybedilmişse CTE boş kalır, deneme kaydı da yazılmaz →
+  zombi worker iz bırakmaz. `withTx` yok; gerekçe `result.go` yorumunda.
+- **Reaper:** lease dolan satırı `retrying`'e döndürür, `attempt_count >= max_attempts`
+  ise `failed` yapar. Claim'deki `attempt_count < max_attempts` koşuluyla birlikte
+  zorunlu — biri eksikse satır ya sonsuz döner ya sonsuza kadar gömülü kalır.
+- **`classify.go` Adım 8 dikişi.** Adım 6 kuralı: 2xx → `sent`; 2xx + `DecodeError` →
+  `sent` + `provider_message_id` NULL (sağlayıcı kabul etti, retrying çift gönderim
+  olurdu); diğer her hata → hak varsa `retrying` + sabit 5 sn, yoksa `failed`.
+  Adım 8'de yalnızca bu dosyanın gövdesi değişecek.
+- **Başarı = her 2xx** (yalnızca 202 değil): webhook.site 200 dönüyor.
+- **Worker HTTP dinlemez, Redis açmaz.** Metrik kararı Adım 9, Redis Adım 7.
+- **Provider client politika kurmaz**, olgu bildirir: `StatusError` (kod + çözülmüş
+  `Retry-After`), `TransportError` (+`Unwrap`), `DecodeError`. Adım 8 `errors.As` ile
+  sınıflandırır, client'a dokunmaz.
+- **`MaxIdleConnsPerHost = WORKER_CONCURRENCY`:** Go'nun varsayılanı host başına 2 idle
+  bağlantı; 100/s'te neredeyse her istek yeni TCP (ve TLS) el sıkışması olurdu.
+- **Ölçüm:** 1000 SMS → 7.7 sn (mock 50 ms gecikme); restart'ta iş kaybı yok, takılı
+  `processing` satırı 0.
+
 ## Modül ve klasörler
 
 Modül yolu: `github.com/XENWRLD/insider-notification-system`
@@ -171,6 +221,11 @@ make up-build    # compose yığınını kurar ve başlatır
 make test        # go test ./...  (testcontainers testleri Docker ister)
 make test-unit   # go test -short ./...  (Docker gerektirmez)
 make lint        # golangci-lint run
+
+make run-worker        # worker'i host'ta calistirir
+make run-mock          # sahte saglayiciyi host'ta calistirir
+make logs-worker       # worker loglarini izler
+make scale-worker N=3  # worker kopyasi sayisini ayarlar
 
 make migrate-up        # bekleyen migration'lari uygular
 make migrate-down N=1  # son N migration'i geri alir

@@ -1,6 +1,4 @@
 # Tek komutla çalışan geliştirme/demo ortamı: docker compose up --build
-#
-# worker servisi Adım 6'nın son commit'inde ekleniyor.
 name: insider-notification-system
 
 services:
@@ -116,6 +114,35 @@ services:
       start_period: 5s
     # SIGTERM sonrası graceful shutdown'a zaman tanınır (SHUTDOWN_TIMEOUT ile uyumlu).
     stop_grace_period: 20s
+    restart: unless-stopped
+
+  # Gönderim motoru. API'den ayrı process: sağlayıcı yavaşladığında API yanıt
+  # süreleri etkilenmez ve gönderim kapasitesi bağımsız ölçeklenir.
+  #
+  # HTTP dinlemiyor, bu yüzden healthcheck yok (Adım 9'da /metrics kararıyla gelecek).
+  # Port da yok: `docker compose up -d --scale worker=3` çakışma üretmesin.
+  worker:
+    build:
+      context: .
+      args:
+        CMD: worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-insider}:${POSTGRES_PASSWORD:-insider}@postgres:5432/${POSTGRES_DB:-notifications}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      # Varsayılan olarak mock'a bakar: webhook.site'in 100 istek / 7 gün kotası tek
+      # yük testinde biterdi. Gerçek sağlayıcı demosu için WORKER_PROVIDER_URL ezilir.
+      PROVIDER_URL: ${WORKER_PROVIDER_URL:-http://mockprovider:8081/send}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      mockprovider:
+        condition: service_healthy
+    # SHUTDOWN penceresinden (WORKER_DRAIN_TIMEOUT) uzun: uçan gönderimler ve
+    # sonuç yazımları bitsin, iş kaybı olmasın.
+    stop_grace_period: 30s
     restart: unless-stopped
 
 volumes:

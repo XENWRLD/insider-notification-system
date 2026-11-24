@@ -25,8 +25,23 @@ const (
 )
 
 // OpenPostgres, bağlantı havuzunu kurar ve kullanılabilir olana kadar bekler.
-func OpenPostgres(ctx context.Context, logger *slog.Logger, dsn string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+//
+// maxConns 0 ise pgx'in varsayılanı (max(4, NumCPU)) korunur. Worker bu değeri
+// açıkça verir: kanal başına onlarca sender kısa sonuç yazmaları yapıyor ve
+// varsayılan havuz bu yazmaları sessizce sıraya sokardı.
+func OpenPostgres(
+	ctx context.Context, logger *slog.Logger, dsn string, maxConns int32,
+) (*pgxpool.Pool, error) {
+	poolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("postgres bağlantı adresi çözümlenemedi: %w", err)
+	}
+
+	if maxConns > 0 {
+		poolConfig.MaxConns = maxConns
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("postgres havuzu kurulamadı: %w", err)
 	}

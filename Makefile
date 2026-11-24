@@ -21,7 +21,7 @@ V ?=
 NAME ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help env up up-build down logs ps build run run-mock test test-unit test-race lint fmt tidy clean \
+.PHONY: help env up up-build down logs ps build run run-mock run-worker logs-worker scale-worker test test-unit test-race lint fmt tidy clean \
         migrate-up migrate-down migrate-version migrate-create migrate-force
 
 help: ## Komut listesini gösterir
@@ -53,6 +53,15 @@ run: env ## API'yi host'ta calistirir (postgres ve redis compose'da olmali)
 
 run-mock: ## Sahte saglayiciyi host'ta calistirir
 	$(GO) run ./cmd/mockprovider
+
+run-worker: ## Worker'i host'ta calistirir (postgres compose'da olmali)
+	$(GO) run ./cmd/worker
+
+logs-worker: ## Worker loglarini izler
+	$(COMPOSE) logs -f worker
+
+scale-worker: ## Worker kopyasi sayisini ayarlar (N=3)
+	$(COMPOSE) up -d --scale worker=$(N) worker
 
 migrate-up: ## Bekleyen migration'lari uygular
 	$(MIGRATE) up
