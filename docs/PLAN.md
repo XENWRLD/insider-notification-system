@@ -341,10 +341,33 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         tek token'ı paylaşması pencereyi tamamen kapatırdı ama Adım 6'nın "token'ı
         worker uydurmaz, tek kaynak DB" kararını ve claim SQL'ini değiştiriyor;
         kalan risk (nadir, satır kaybı yok, en kötü 60 sn gecikme) bunu hak etmiyor
-- [ ] **Adım 9 — Gözlemlenebilirlik:** `/metrics`, uçtan uca correlation ID, `/health/ready` → `feat: add metrics, structured logging and health checks`
-  - [ ] Worker metrikleri (gönderim gecikmesi, sent/failed sayaçları) worker process'inde
-        oluşuyor: worker'a ayrı portta /metrics mi açılacak, yoksa API metrikleri DB'den
-        (notifications + notification_attempts.duration_ms) mi hesaplayacak? Karar Adım 9'da.
+- [x] **Adım 9 — Gözlemlenebilirlik:** `/metrics`, uçtan uca correlation ID, `/health/ready` → `feat: add metrics, structured logging and health checks`
+  - [x] **Açık soru cevaplandı: tek `/metrics` ucu API'de, worker'a port AÇILMADI.**
+        Değerler veritabanından türetiliyor (`notifications` + `notification_attempts`).
+        Gerekçe: `--scale worker=3` ile üç kopyanın kendi portunu expose etmesi hem
+        yüzey hem kopya toplama demekti; DB zaten tek doğruluk kaynağı. Bedeli,
+        değerlerin counter değil GAUGE olması — adlandırma bunu söylüyor
+  - [x] `queue_depth` yalnızca AKTİF durumları sayıyor (Adım 2'nin kısmi index'leri);
+        maliyet tablo boyutundan değil aktif satır sayısından geliyor,
+        `TestQueueDepthQueryAvoidsSeqScan` EXPLAIN ile sabitliyor
+  - [x] **Kümülatif terminal sayımı ÖLÇÜMLE reddedildi:** WHERE koşulu index'in kısmi
+        yordamıyla birebir aynı olduğu için planlayıcı Seq Scan seçiyor (15.500 satırda
+        317 buffer) ve maliyet tablo boyutuyla büyüyordu → pencereli
+        `notifications_terminal_recent`
+  - [x] **İki gecikme birlikte:** uçtan uca (`created_at→updated_at`, kuyrukta bekleme
+        dâhil) ve sağlayıcı çağrısının kendi süresi (`notification_attempts.duration_ms`).
+        İkisi birlikte "yavaşlık kuyrukta mı sağlayıcıda mı" sorusunu cevaplıyor —
+        ölçümde p50 1.65 sn ↔ 0.021 sn, yani fark kuyruk/hız sınırı
+  - [x] **Devre kesici durumu Redis üzerinden** (`internal/breakerstate`): anahtar
+        KOPYA BAŞINA (`<kanal>:<hostname>`), TTL periyodun üç katı ve worker durumları
+        periyodik yeniden yazıyor (yalnızca değişimde yazmak TTL'i tazelemezdi).
+        Ölçümde iki kopyanın devreleri farklı düşünüyor — yerel breaker'ın belgelenen
+        sonucu metrikte görünüyor
+  - [x] **`/metrics` kimliksiz olduğu için korumalı:** 5 sn önbellek + singleflight
+        (eşzamanlı scrape'ler tek sorgu turu paylaşıyor), sorgu başına 2 sn zaman aşımı,
+        sorgular sırayla koşuyor. Bir sorgu düşse uç yine dönüyor ve
+        `collect_errors` bunu bildiriyor
+  - [x] `migrations/000005`: iki metrik index'i, ikisi de EXPLAIN ile doğrulandı
 - [ ] **Motor testleri:** çift claim yok, lease recovery, retry → `test: add worker integration tests`
 
 **Gün sonu kontrolü:** 1000 SMS ≈ 10 sn; worker restart'ta iş kaybı yok; %30 hata oranında retry görülüyor; webhook.site'ta 3 kanal doğru JSON.

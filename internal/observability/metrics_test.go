@@ -287,3 +287,32 @@ func TestCollectorOutputIsValidPrometheusText(t *testing.T) {
 		require.NotContains(t, line, "\t", "Prometheus metni sekme içermemeli")
 	}
 }
+
+// TestCollectorReportsLastRoundHealthOnCacheHit, önbellek isabetinde de son turun
+// gerçek süresinin ve hata sayısının yayınlandığını doğrular.
+//
+// İlk hâlinde önbellek isabetinde 0 yayınlanıyordu: help metni "son toplama turunun
+// süresi" dediği hâlde "toplama anlıktı, hiç hata yoktu" bilgisi veriyordu. Canlı
+// /metrics çıktısına bakarken fark edildi.
+func TestCollectorReportsLastRoundHealthOnCacheHit(t *testing.T) {
+	t.Parallel()
+
+	metrics := &stubMetricsStore{
+		delay:       20 * time.Millisecond,
+		terminalErr: errors.New("bağlantı koptu"),
+	}
+	collector := NewCollector(metrics, nil, discardLogger())
+
+	// İlk tur: sorgular gerçekten koşuyor.
+	first := gather(t, collector)
+	require.Contains(t, first, "notifications_metrics_collect_errors 1")
+
+	// İkinci tur önbellekten geliyor ama aynı değerleri bildirmeli.
+	second := gather(t, collector)
+
+	require.Equal(t, int64(1), metrics.rounds.Load(), "ikinci scrape önbellekten gelmeli")
+	require.Contains(t, second, "notifications_metrics_collect_errors 1",
+		"önbellek isabetinde hata sayısı sıfırlanmamalı")
+	require.NotContains(t, second, "notifications_metrics_collect_duration_seconds 0\n",
+		"önbellek isabetinde süre 0 bildirilmemeli")
+}

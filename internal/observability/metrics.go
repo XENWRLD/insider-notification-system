@@ -64,6 +64,12 @@ type snapshot struct {
 	provider store.Percentiles
 	breakers []breakerstate.Entry
 	at       time.Time
+
+	// failures/elapsed, turun KENDİ sağlığı. Snapshot'ta tutuluyor ki önbellek
+	// isabetinde de gerçek değerler yayınlansın: 0 yayınlamak "toplama anlıktı" ve
+	// "hiç hata yoktu" demek olurdu, oysa doğru bilgi son turun sonucu.
+	failures int
+	elapsed  time.Duration
 }
 
 // Collector, bildirim metriklerini veritabanından ve Redis'ten toplar.
@@ -157,7 +163,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 // metrik eksik kalıyor. Aksi hâlde tek bir yavaş sorgu bütün izlemeyi kör ederdi —
 // ve izlemenin kör olduğu an, tam da ona en çok ihtiyaç duyulan andır.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
-	snap, failures, elapsed := c.load()
+	snap := c.load()
 
 	for _, count := range snap.queue {
 		ch <- prometheus.MustNewConstMetric(c.queueDepth, prometheus.GaugeValue,
@@ -179,48 +185,48 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			breakerStateValue(entry.State), string(entry.Channel), entry.Worker)
 	}
 
-	ch <- prometheus.MustNewConstMetric(c.collectErrors, prometheus.GaugeValue, float64(failures))
-	ch <- prometheus.MustNewConstMetric(c.collectSeconds, prometheus.GaugeValue, elapsed.Seconds())
+	ch <- prometheus.MustNewConstMetric(c.collectErrors, prometheus.GaugeValue,
+		float64(snap.failures))
+	ch <- prometheus.MustNewConstMetric(c.collectSeconds, prometheus.GaugeValue,
+		snap.elapsed.Seconds())
 }
 
 // load, önbellekten okur ya da tek bir toplama turu koşturur.
-func (c *Collector) load() (snapshot, int, time.Duration) {
+func (c *Collector) load() snapshot {
 	c.mu.Lock()
 	cached := c.cached
 	c.mu.Unlock()
 
 	if cached != nil && time.Since(cached.at) < cacheTTL {
-		return *cached, 0, 0
-	}
-
-	type result struct {
-		snap     snapshot
-		failures int
-		elapsed  time.Duration
+		return *cached
 	}
 
 	// singleflight: aynı anda gelen scrape'ler tek tur paylaşıyor. Anahtar sabit
 	// çünkü toplanacak tek bir küme var.
 	value, _, _ := c.flight.Do("collect", func() (any, error) {
 		started := time.Now()
-		snap, failures := c.gather()
-		elapsed := time.Since(started)
 
+		snap, failures := c.gather()
+
+		snap.failures = failures
+		snap.elapsed = time.Since(started)
 		snap.at = time.Now()
 
 		c.mu.Lock()
 		c.cached = &snap
 		c.mu.Unlock()
 
-		return result{snap: snap, failures: failures, elapsed: elapsed}, nil
+		return snap, nil
 	})
 
-	collected, ok := value.(result)
+	collected, ok := value.(snapshot)
 	if !ok {
-		return snapshot{}, 1, 0
+		// Ulaşılamaz: Do her zaman snapshot döndürüyor. Yine de sessiz kalmamak için
+		// bir hata sayılıyor.
+		return snapshot{failures: 1}
 	}
 
-	return collected.snap, collected.failures, collected.elapsed
+	return collected
 }
 
 // gather, bütün sorguları koşturur ve başarısız olanların sayısını döner.
