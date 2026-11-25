@@ -1,0 +1,982 @@
+# Bu dosya API sözleşmesinin makine-okunur hâlidir ve ELLE yazılır (koddan üretilmez).
+# Sapmayı internal/httpapi/docs_test.go yakalar: uç listesi chi router'ıyla, şema
+# alanları yanıt DTO'larının json etiketleriyle, error enum'u da errors.go'daki
+# errorCodes dizisiyle karşılaştırılır. Yeni bir uç/alan/hata kodu eklenip buraya
+# yazılmazsa `make test-unit` kırılır.
+openapi: 3.0.3
+
+info:
+  title: Insider Notification System API
+  version: "1.0.0"
+  description: |
+    Event-driven bildirim sistemi: SMS / e-posta / push.
+
+    **Kabul semantiği.** Oluşturma uçları `202 Accepted` döner, `201` değil: kayıt
+    oluşturulmuş ama gönderim henüz yapılmamıştır. Gönderimi worker yapar; sonucu
+    `GET /api/v1/notifications/{id}` ile izlenir. `status: sent` "sağlayıcı kabul
+    etti" demektir, teslimat onayı değil.
+
+    **Hata biçimi.** Tüm hatalar (404 ve 405 dâhil) aynı zarfı kullanır:
+    `{error, message, fields?, correlation_id}`. RFC 9457 (`application/problem+json`)
+    yerine bu düz zarf seçildi: istemci tarafında ek bir şema gerektirmiyor ve alan
+    bazlı hataları doğrudan forma bağlanabilen bir harita olarak veriyor.
+
+    **İzlenebilirlik.** Her yanıt `X-Correlation-ID` taşır; istemci kendi kimliğini
+    aynı başlıkla gönderirse ona saygı duyulur. Kimlik bildirim kaydıyla birlikte
+    veritabanına yazıldığı için worker loglarında da aynı değerle görünür.
+
+    **Dokümantasyon.** Bu spec binary'e gömülüdür ve `/openapi.yaml` adresinden
+    sunulur; tarayıcı arayüzü `/docs` altındadır.
+  contact:
+    name: Kaynak kod
+    url: https://github.com/XENWRLD/insider-notification-system
+
+# Kimlik doğrulama YOK ve bu bilinçli: case study kapsamında uçlar açık bırakıldı.
+# Üretimde API bir ağ geçidinin arkasında dururdu; boş liste "bu uçlar kimlik
+# istemiyor" demenin makine-okunur hâli (dokümanı okuyan aracın varsayımda
+# kalmasına gerek yok).
+security: []
+
+servers:
+  - url: http://localhost:{port}
+    description: Yerel compose yığını (port = HTTP_PORT, varsayılan 8080)
+    variables:
+      port:
+        default: "8080"
+
+tags:
+  - name: Notifications
+    description: Bildirim oluşturma, sorgulama ve iptal
+  - name: Batches
+    description: Toplu oluşturulan bildirimlerin özeti
+  - name: Operations
+    description: Sağlık kontrolleri ve metrikler
+  - name: Documentation
+    description: OpenAPI spec'i ve tarayıcı arayüzü
+
+paths:
+  /api/v1/notifications:
+    post:
+      tags: [Notifications]
+      summary: Tekil bildirim oluştur
+      description: |
+        Bildirimi doğrular, `pending` olarak yazar ve `202` döner.
+
+        `Idempotency-Key` verilirse aynı anahtar + aynı gövde ile gelen tekrar
+        istekleri yeni kayıt oluşturmaz; saklanan cevap `Idempotent-Replay: true`
+        ile aynen döner.
+      operationId: createNotification
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationIDRequest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotificationRequest'
+            examples:
+              sms:
+                summary: SMS
+                value:
+                  channel: sms
+                  recipient: "+905551234567"
+                  content: "Flash sale basladi"
+                  priority: high
+              email:
+                summary: E-posta
+                value:
+                  channel: email
+                  recipient: user@example.com
+                  content: "Siparisiniz kargoya verildi."
+      responses:
+        "202":
+          description: |
+            Kabul edildi. Tekrar gönderimde de aynı gövde ve `Location` döner;
+            yalnızca `Idempotent-Replay` başlığı eklenir.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "409":
+          description: |
+            Aynı `Idempotency-Key` farklı bir istek gövdesiyle kullanılmış.
+            Hash ham gövde baytlarından hesaplanır: fazladan boşluk veya farklı alan
+            sırası da farklı gövde sayılır (bilinçli katılık — gerçek tekrar denemeleri
+            aynı baytları gönderir).
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error: conflict
+                message: bu Idempotency-Key farklı bir istek gövdesiyle kullanılmış
+                correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+        "413":
+          $ref: '#/components/responses/PayloadTooLargeSingle'
+        "415":
+          $ref: '#/components/responses/UnsupportedMediaType'
+        "500":
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Notifications]
+      summary: Bildirimleri filtrele ve sayfala
+      description: |
+        Aynı parametrenin birden çok değeri **VEYA**, farklı parametreler **VE** ile
+        birleşir (`?status=failed&status=retrying&channel=sms`).
+
+        Sayfalama imleç (cursor) tabanlıdır ve imleç **opaktır**: yalnızca önceki
+        yanıttan gelen `next_cursor` geri verilmelidir, elle kurulmamalıdır.
+        Son sayfada `next_cursor` `null` olur.
+      operationId: listNotifications
+      parameters:
+        - $ref: '#/components/parameters/FilterStatus'
+        - $ref: '#/components/parameters/FilterChannel'
+        - $ref: '#/components/parameters/FilterFrom'
+        - $ref: '#/components/parameters/FilterTo'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CorrelationIDRequest'
+      responses:
+        "200":
+          description: Sayfa
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationList'
+        "400":
+          description: |
+            Geçersiz filtre (`validation_failed`) veya bozuk imleç (`invalid_cursor`).
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                invalid_cursor:
+                  value:
+                    error: invalid_cursor
+                    message: cursor değeri geçersiz; yalnızca önceki yanıttan gelen next_cursor kullanılmalı
+                    correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+                validation_failed:
+                  value:
+                    error: validation_failed
+                    message: istek doğrulanamadı
+                    fields:
+                      from: saat dilimi içeren RFC3339 biçiminde olmalı (örn. 2026-11-01T00:00:00Z); yalnızca tarih kabul edilmiyor
+                    correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+        "500":
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/notifications/batch:
+    post:
+      tags: [Notifications]
+      summary: Toplu bildirim oluştur (1–1000)
+      description: |
+        Tek transaction, **hep ya hiç**: bir öğe geçersizse hiçbiri yazılmaz ve hatalı
+        satırların tümü tek yanıtta `notifications[3].recipient` biçimli anahtarlarla
+        döner.
+
+        Yanıt özettir (her kaydın tam gövdesi değil): 1000 öğede bu yanıt megabaytlara
+        çıkardı. Ayrıntı `GET /api/v1/notifications/{id}` ile alınır.
+
+        İki sınır **birlikte** uygulanır: en fazla 1000 öğe ve `BODY_LIMIT_BATCH`
+        (varsayılan 16 MiB) gövde. Türkçe/emoji içerikli çok uzun e-posta batch'leri
+        öğe sınırından önce bayt sınırına takılabilir.
+      operationId: createNotificationBatch
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationIDRequest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchCreateRequest'
+            example:
+              notifications:
+                - channel: sms
+                  recipient: "+905551234567"
+                  content: "Son dakika: stoklar tukeniyor"
+                  priority: high
+                - channel: push
+                  recipient: fcm-device-token-abc123
+                  content: "Sepetinizde bekleyen urun var"
+      responses:
+        "202":
+          description: Kabul edildi
+          headers:
+            Location:
+              description: Oluşan batch'in özet yolu
+              schema:
+                type: string
+                example: /api/v1/batches/8c6b1f2a-5d3e-4a21-9f77-0b1c2d3e4f56
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchCreateResponse'
+        "400":
+          description: |
+            Boyut hatası istek bazlı (`notifications` alanı), öğe hataları satır bazlı
+            (`notifications[3].recipient`).
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error: validation_failed
+                message: istek doğrulanamadı
+                fields:
+                  notifications[3].recipient: E.164 biçiminde olmalı (örn. +905551234567)
+                  notifications[7].content: zorunlu
+                correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+        "409":
+          description: Aynı `Idempotency-Key` farklı bir istek gövdesiyle kullanılmış
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "413":
+          $ref: '#/components/responses/PayloadTooLargeBatch'
+        "415":
+          $ref: '#/components/responses/UnsupportedMediaType'
+        "500":
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/notifications/{id}:
+    get:
+      tags: [Notifications]
+      summary: Bildirimi deneme geçmişiyle getir
+      description: |
+        `attempts` **her zaman** dizidir: denemesi olmayan kayıtta `[]` döner, `null`
+        dönmez.
+      operationId: getNotification
+      parameters:
+        - $ref: '#/components/parameters/NotificationID'
+        - $ref: '#/components/parameters/CorrelationIDRequest'
+      responses:
+        "200":
+          description: Bildirim
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        "404":
+          $ref: '#/components/responses/NotificationNotFound'
+        "500":
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/notifications/{id}/cancel:
+    post:
+      tags: [Notifications]
+      summary: Bildirimi iptal et
+      description: |
+        Tek bir atomik `UPDATE` ile yalnızca `pending` veya `retrying` durumundaki
+        kayıtlar iptal edilir. Gönderim başlamışsa (`processing`) veya kayıt terminal
+        durumdaysa `409` döner — worker'ın claim'i ile yarışta claim kazanırsa sonuç
+        budur.
+
+        Gövde beklemez: durum geçişi için ek bir bilgi gerekmiyor.
+      operationId: cancelNotification
+      parameters:
+        - $ref: '#/components/parameters/NotificationID'
+        - $ref: '#/components/parameters/CorrelationIDRequest'
+      responses:
+        "200":
+          description: "İptal edildi (`status: cancelled`)"
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        "404":
+          $ref: '#/components/responses/NotificationNotFound'
+        "409":
+          description: Kayıt iptal edilebilir durumda değil
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error: conflict
+                message: "bildirim iptal edilemez: yalnızca pending veya retrying durumundaki bildirimler iptal edilebilir"
+                correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+        "500":
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/batches/{id}:
+    get:
+      tags: [Batches]
+      summary: Batch özeti
+      description: |
+        `counts` altı durumun **tamamını** içerir, sıfırlar dâhil: istemci alanın
+        varlığını kontrol etmek zorunda kalmasın.
+      operationId: getBatchSummary
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Batch kimliği. Çözümlenemeyen UUID `404` alır.
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/CorrelationIDRequest'
+      responses:
+        "200":
+          description: Özet
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchSummary'
+        "404":
+          description: Batch bulunamadı
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error: not_found
+                message: batch bulunamadı
+                correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+        "500":
+          $ref: '#/components/responses/InternalError'
+
+  /health/live:
+    get:
+      tags: [Operations]
+      summary: Liveness
+      description: |
+        Bilerek hiçbir bağımlılığa dokunmaz: liveness başarısız olduğunda orchestrator
+        container'ı yeniden başlatır ve veritabanı geçici olarak düştüğü için API'yi
+        yeniden başlatmak kesintiyi yalnızca büyütür.
+      operationId: healthLive
+      responses:
+        "200":
+          description: Process ayakta
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /health/ready:
+    get:
+      tags: [Operations]
+      summary: Readiness (postgres + redis)
+      description: |
+        Bağımlılıklardan biri erişilemezse `503` döner. Hata **metni** yanıta konmaz,
+        yalnızca log'a: bu uç geçerli bir gövde gerektirmeden erişilebilen tek uç ve
+        bağlantı dizesi iç DNS adını, kullanıcı adını ve portu sızdırabilirdi.
+      operationId: healthReady
+      responses:
+        "200":
+          description: Trafik alınabilir
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessReport'
+              example:
+                status: ready
+                checks:
+                  postgres: ok
+                  redis: ok
+        "503":
+          description: En az bir bağımlılık erişilemez
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessReport'
+              example:
+                status: unavailable
+                checks:
+                  postgres: ok
+                  redis: error
+
+  /metrics:
+    get:
+      tags: [Operations]
+      summary: Prometheus metrikleri
+      description: |
+        Değerler veritabanından türetilir (kuyruk derinliği, son 15 dakikanın terminal
+        sayımları, uçtan uca ve sağlayıcı gecikmesi yüzdelikleri) ve devre kesici
+        durumu Redis'ten okunur. Worker'lar kendi portunu açmaz; bu yüzden değerler
+        counter değil **gauge**'dur ve adlandırma bunu söyler.
+
+        Uç kimliksiz olduğu için korumalı: 5 saniyelik önbellek + singleflight,
+        sorgu başına 2 saniye zaman aşımı.
+      operationId: metrics
+      responses:
+        "200":
+          description: Prometheus metin biçimi
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      tags: [Documentation]
+      summary: Bu spec dosyası
+      description: |
+        Dosya binary'e gömülüdür (`go:embed`), diskten okunmaz. `ETag` içerikten
+        türetilir; `If-None-Match` ile `304` alınabilir.
+      operationId: openapiSpec
+      responses:
+        "200":
+          description: Spec
+          headers:
+            ETag:
+              description: İçerikten türetilen güçlü doğrulayıcı
+              schema:
+                type: string
+          content:
+            application/yaml:
+              schema:
+                type: string
+        "304":
+          description: İstemcideki kopya güncel (`If-None-Match` eşleşti)
+
+  /docs:
+    get:
+      tags: [Documentation]
+      summary: Swagger UI
+      description: |
+        Tek sayfalık arayüz. Swagger UI varlıkları sabit sürümle ve SRI
+        (`integrity`) doğrulamasıyla CDN'den gelir; internet erişimi olmayan bir
+        ortamda sayfa boş kalır ama `/openapi.yaml` yine erişilebilirdir.
+      operationId: docsUI
+      responses:
+        "200":
+          description: HTML sayfası
+          content:
+            text/html:
+              schema:
+                type: string
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        İsteğe bağlı tekrar gönderim koruması; en fazla 255 karakter. Verilmezse
+        koruma kapalıdır. Aynı anahtar + aynı gövde saklanan cevabı döner, aynı
+        anahtar + farklı gövde `409` alır.
+      schema:
+        type: string
+        maxLength: 255
+        example: order-42-sms-retry-1
+
+    CorrelationIDRequest:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: |
+        İstemcinin kendi izleme kimliği. Verilmezse sunucu üretir; her iki durumda da
+        yanıtta aynı başlıkla döner ve bildirim kaydına yazılır.
+      schema:
+        type: string
+
+    NotificationID:
+      name: id
+      in: path
+      required: true
+      description: |
+        Bildirim kimliği. Çözümlenemeyen bir UUID `400` değil `404` alır: geçersiz
+        biçimli bir kimlik zaten hiçbir kaydı gösteremez.
+      schema:
+        type: string
+        format: uuid
+
+    FilterStatus:
+      name: status
+      in: query
+      required: false
+      description: Durum filtresi; birden çok kez verilebilir (VEYA).
+      explode: true
+      schema:
+        type: array
+        items:
+          $ref: '#/components/schemas/Status'
+
+    FilterChannel:
+      name: channel
+      in: query
+      required: false
+      description: Kanal filtresi; birden çok kez verilebilir (VEYA).
+      explode: true
+      schema:
+        type: array
+        items:
+          $ref: '#/components/schemas/Channel'
+
+    FilterFrom:
+      name: from
+      in: query
+      required: false
+      description: |
+        `created_at >= from`. Saat dilimi içeren RFC3339 zorunlu; yalnızca tarih
+        (`2026-11-01`) reddedilir — dilimsiz bir tarih, istemci ile sunucu farklı
+        dilimlerdeyse sessizce farklı aralıklar üretir.
+      schema:
+        type: string
+        format: date-time
+        example: "2026-11-01T00:00:00Z"
+
+    FilterTo:
+      name: to
+      in: query
+      required: false
+      description: |
+        `created_at < to`. Aralık **yarı açıktır** `[from, to)`: ardışık pencereler
+        sınır kaydını iki kez saymaz.
+      schema:
+        type: string
+        format: date-time
+        example: "2026-12-01T00:00:00Z"
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opak imleç. Yalnızca önceki yanıttan gelen `next_cursor` geri verilmelidir;
+        iç yapısı değişebilir. Bozuk imleç `400 invalid_cursor` alır.
+      schema:
+        type: string
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Sayfa boyutu.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  headers:
+    Location:
+      description: Oluşan kaynağın yolu
+      schema:
+        type: string
+        example: /api/v1/notifications/0b7c9d2e-4f61-4a8b-9c3d-5e6f7a8b9c01
+    IdempotentReplay:
+      description: |
+        Yalnızca saklanan bir cevap döndüğünde ve değeri `true` olarak bulunur.
+        İstemci "isteğim yeni mi işlendi, yoksa tekrar mı" sorusunu buradan ayırır.
+      schema:
+        type: string
+        enum: ["true"]
+    CorrelationID:
+      description: Bu isteğin izleme kimliği (log ve kayıtlarla aynı değer)
+      schema:
+        type: string
+
+  responses:
+    ValidationFailed:
+      description: Alan bazlı doğrulama hatası (tüm hatalı alanlar tek yanıtta)
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: validation_failed
+            message: istek doğrulanamadı
+            fields:
+              recipient: E.164 biçiminde olmalı (örn. +905551234567)
+              content: GSM-7 SMS en fazla 160 septet olabilir (184 hesaplandı)
+            correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+
+    NotificationNotFound:
+      description: Bildirim bulunamadı (geçersiz biçimli UUID de buraya düşer)
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: not_found
+            message: bildirim bulunamadı
+            correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+
+    UnsupportedMediaType:
+      description: '`Content-Type: application/json` olmalı'
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: unsupported_media_type
+            message: Content-Type application/json olmalı
+            correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+
+    PayloadTooLargeSingle:
+      description: |
+        Gövde `BODY_LIMIT_SINGLE` sınırını (varsayılan 128 KiB) aştı. Sınır uç başına
+        ayrıdır: batch ucu çok daha büyük bir gövde kabul eder.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: payload_too_large
+            message: istek gövdesi çok büyük (sınır 131072 bayt)
+            correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+
+    PayloadTooLargeBatch:
+      description: Gövde `BODY_LIMIT_BATCH` sınırını (varsayılan 16 MiB) aştı
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: payload_too_large
+            message: "istek gövdesi çok büyük (sınır 16777216 bayt); batch'i daha küçük parçalara bölün"
+            correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+
+    InternalError:
+      description: |
+        Beklenmeyen hata. Ayrıntı istemciye sızmaz; `correlation_id` ile log satırı
+        tek sorguda bulunur.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: internal_error
+            message: istek kaydedilemedi
+            correlation_id: 4f1c2b8e-9a3d-4c7f-8f21-2b6d0c5a7e13
+
+  schemas:
+    Channel:
+      type: string
+      enum: [sms, email, push]
+
+    Priority:
+      type: string
+      description: |
+        Kuyruk sırası `priority_rank, available_at, id` ile belirlenir. Yüksek öncelikli
+        trafik akmaya devam ettiği sürece düşük öncelikli kayıtlar beklemede kalabilir
+        (starvation); aging bilinçli olarak uygulanmadı, gerekçesi README'de.
+      enum: [high, normal, low]
+      default: normal
+
+    Status:
+      type: string
+      description: |
+        `pending → processing → sent`; hata hâlinde `retrying` (zamanı gelince yeniden
+        `processing`) ya da `failed`. `cancelled` yalnızca `pending`/`retrying`'den
+        geçilebilir. `sent` sağlayıcının kabulüdür, teslimat onayı değildir.
+      enum: [pending, processing, sent, retrying, failed, cancelled]
+
+    ErrorEnvelope:
+      type: object
+      description: Tüm hata yanıtlarının gövdesi (404 ve 405 dâhil).
+      required: [error, message, correlation_id]
+      properties:
+        error:
+          type: string
+          description: |
+            Makine okunur hata kodu. Tek kaynak `internal/httpapi/errors.go`;
+            bu liste oradaki `errorCodes` dizisiyle test altında eşitlenir.
+          enum:
+            - validation_failed
+            - invalid_json
+            - unsupported_media_type
+            - payload_too_large
+            - invalid_cursor
+            - not_found
+            - method_not_allowed
+            - conflict
+            - internal_error
+        message:
+          type: string
+          description: İnsan okunur açıklama (Türkçe).
+        fields:
+          type: object
+          description: |
+            Alan adı → hata mesajı. Yalnızca alan bazlı hatalarda bulunur. Batch
+            uçlarında anahtar `notifications[3].recipient` biçimindedir.
+          additionalProperties:
+            type: string
+        correlation_id:
+          type: string
+          description: Her hata yanıtında bulunur.
+
+    CreateNotificationRequest:
+      type: object
+      description: |
+        Bilinmeyen alanlar reddedilir (`invalid_json`): `prioritiy` gibi bir yazım
+        hatasının sessizce yutulması, istemcinin fark etmediği bir bug olurdu.
+      required: [channel, recipient, content]
+      properties:
+        channel:
+          $ref: '#/components/schemas/Channel'
+        recipient:
+          type: string
+          description: |
+            Kanala göre: **sms** E.164 (`+905551234567`), **email** çıplak e-posta
+            adresi (en fazla 254 karakter; `Ali <a@b.com>` biçimi reddedilir),
+            **push** boşluk içermeyen device token (en fazla 512 karakter).
+          example: "+905551234567"
+        content:
+          type: string
+          description: |
+            Kanala göre: **sms** GSM-7'ye kodlanabiliyorsa 160 septet, aksi hâlde 70
+            UTF-16 kod birimi (emoji 2 birim sayar; `ş ğ ı İ` ve küçük `ç` GSM-7
+            tablosunda yok, yani tek Türkçe harf sınırı 160'tan 70'e düşürür).
+            **email** en fazla 10.000 karakter, **push** en fazla 512 karakter.
+            Yalnızca boşluktan oluşan içerik boş sayılır.
+          example: Flash sale basladi
+        priority:
+          $ref: '#/components/schemas/Priority'
+
+    BatchCreateRequest:
+      type: object
+      description: |
+        Düz dizi yerine nesneye sarmalanmıştır: ileride batch'e ait ortak alanlar
+        eklendiğinde sözleşme bozulmadan büyüyebilsin.
+      required: [notifications]
+      properties:
+        notifications:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/CreateNotificationRequest'
+
+    BatchCreateResponse:
+      type: object
+      required: [batch_id, accepted_count, notification_ids, correlation_id]
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        accepted_count:
+          type: integer
+          example: 1000
+        notification_ids:
+          type: array
+          description: Oluşan kayıtların kimlikleri, gönderilen sırayla.
+          items:
+            type: string
+            format: uuid
+        correlation_id:
+          type: string
+          description: Batch'in tamamı tek istekten doğduğu için tüm satırlar bu kimliği taşır.
+
+    Notification:
+      type: object
+      description: |
+        Dışa verilen biçim. `lease_token`, `lease_expires_at`, `priority_rank` ve
+        `template_id` iç mekanizma detayıdır ve bu şemada **yoktur**.
+      required:
+        - id
+        - channel
+        - recipient
+        - content
+        - priority
+        - status
+        - attempt_count
+        - max_attempts
+        - available_at
+        - correlation_id
+        - created_at
+        - updated_at
+        - attempts
+      properties:
+        id:
+          type: string
+          format: uuid
+        batch_id:
+          type: string
+          format: uuid
+          description: Yalnızca toplu oluşturulan kayıtlarda bulunur.
+        channel:
+          $ref: '#/components/schemas/Channel'
+        recipient:
+          type: string
+        content:
+          type: string
+        priority:
+          $ref: '#/components/schemas/Priority'
+        status:
+          $ref: '#/components/schemas/Status'
+        attempt_count:
+          type: integer
+          description: |
+            Claim anında artar. Kapanışta geri verilen (hiç denenmemiş) satırlarda
+            tekrar azaltılır, bu yüzden `retrying` + `attempt_count: 0` görülebilir.
+        max_attempts:
+          type: integer
+          example: 5
+        available_at:
+          type: string
+          format: date-time
+          description: |
+            Kaydın ne zaman çekilebilir olduğu. Retry gecikmesi, normal gönderim ve
+            (bonus) zamanlanmış gönderim aynı alanı kullanır.
+        provider_message_id:
+          type: string
+          description: Sağlayıcının verdiği kimlik; yanıt gövdesi çözülemediyse yoktur.
+        last_error:
+          type: string
+          description: Son başarısız denemenin özeti.
+        correlation_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        attempts:
+          type: array
+          description: |
+            **Her zaman dizi**: denemesi olmayan kayıtta `[]`, asla `null`. Listeleme
+            ucunda da gerçek veri döner (boş bırakmak "denenmedi" demek olurdu).
+          items:
+            $ref: '#/components/schemas/Attempt'
+
+    Attempt:
+      type: object
+      required: [attempt_no, status_code, error, duration_ms, created_at]
+      properties:
+        attempt_no:
+          type: integer
+          minimum: 1
+        status_code:
+          type: integer
+          nullable: true
+          description: Timeout veya bağlantı hatasında `null` olur — hiç HTTP yanıtı gelmedi.
+        error:
+          type: string
+          nullable: true
+          description: Başarılı denemede `null`.
+        duration_ms:
+          type: integer
+          description: Sağlayıcı çağrısının süresi.
+        created_at:
+          type: string
+          format: date-time
+
+    NotificationList:
+      type: object
+      required: [notifications, next_cursor]
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Son sayfada `null`. Opaktır; olduğu gibi geri verilmelidir.
+
+    BatchSummary:
+      type: object
+      required: [batch_id, total, counts, completed, created_at]
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        total:
+          type: integer
+        counts:
+          type: object
+          description: Altı durumun tamamı, sıfırlar dâhil.
+          additionalProperties:
+            type: integer
+          example:
+            pending: 0
+            processing: 2
+            sent: 996
+            retrying: 1
+            failed: 1
+            cancelled: 0
+        completed:
+          type: boolean
+          description: Hiçbir kayıt aktif durumda değil (`sent`/`failed`/`cancelled`).
+        created_at:
+          type: string
+          format: date-time
+
+    ReadinessReport:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ready, unavailable]
+        checks:
+          type: object
+          description: Bağımlılık adı → `ok` veya `error`.
+          additionalProperties:
+            type: string
+            enum: [ok, error]

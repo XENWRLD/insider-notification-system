@@ -35,6 +35,11 @@ type Dependencies struct {
 	// metrik toplayıcısı olmayan bir kurulumda 404 dönmek, boş bir /metrics
 	// yayınlamaktan dürüst.
 	MetricsCollector prometheus.Collector
+
+	// OpenAPISpec, /openapi.yaml ve /docs uçlarının kaynağı (gömülü doküman).
+	// nil ise ikisi de hiç kaydedilmez — MetricsCollector ile aynı gerekçe:
+	// boş bir doküman yayınlamak, dokümanın olmadığını söylemekten kötü.
+	OpenAPISpec []byte
 }
 
 // NewRouter, middleware zinciri kurulmuş HTTP handler'ını döner.
@@ -126,6 +131,18 @@ func NewRouter(deps Dependencies) http.Handler {
 
 		router.Method(http.MethodGet, "/metrics", metricsHandler)
 		router.Method(http.MethodHead, "/metrics", metricsHandler)
+	}
+
+	// Dokümantasyon: spec gömülü geldiği için uçlar diskten okumuyor.
+	// /docs ve /openapi.yaml sürümlü tabanın DIŞINDA: doküman API'nin bir kaynağı
+	// değil, API'nin kendisinin açıklaması — v2 geldiğinde de aynı adreste durur.
+	if deps.OpenAPISpec != nil {
+		docs := newDocsHandler(deps.OpenAPISpec)
+
+		router.Get(specPath, docs.serveSpec)
+		router.Head(specPath, docs.serveSpec)
+		router.Get("/docs", docs.serveUI)
+		router.Head("/docs", docs.serveUI)
 	}
 
 	// Sürümlü API tabanı. /ws (bonus) buraya eklenecek.

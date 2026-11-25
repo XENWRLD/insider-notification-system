@@ -188,11 +188,15 @@ internal/
   provider/       HTTP client
   ratelimit/      Redis jeton kovası
   observability/  metrikler, logger
-migrations/   api/openapi.yaml   deploy/ (grafana, prometheus)   loadtest/ (k6)
+migrations/   api/openapi/ (openapi.yaml + embed.go)   deploy/ (grafana, prometheus)   loadtest/ (k6)
 docs/PLAN.md  CLAUDE.md  README.md  Makefile  Dockerfile  docker-compose.yml  .env.example
 ```
 
 Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
+
+Spec `api/openapi.yaml` değil `api/openapi/openapi.yaml`: dosya `go:embed` ile binary'e
+gömülüyor ve embed kendi klasörünün dışına çıkamadığı için yanında küçük bir Go dosyası
+duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
 
 ---
 
@@ -379,7 +383,28 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
 - [ ] **Bonus — WebSocket:** Redis pub/sub → `/ws` → `feat: add websocket status updates`
 - [ ] **Kanıt:** k6 yük testi, Prometheus + Grafana paneli → `chore: add load test and dashboards`
 - [ ] **Dokümantasyon:** OpenAPI + Swagger UI, README → `docs: add OpenAPI spec and README`
-  - [ ] OpenAPI'de `error` kodu enum'unu listele — tek kaynak: `internal/httpapi/errors.go`
+      *(OpenAPI + Swagger UI bitti: `docs: add OpenAPI spec and Swagger UI`; README ayrı commit)*
+  - [x] **OpenAPI 3.0.3 speci** `api/openapi/openapi.yaml`, elle yazıldı (koddan
+        üretilmedi): 11 uç, kanal bazlı validation kuralları, idempotency/cursor/
+        tarih aralığı sözleşmeleri ve her hata durumu örnekli. Redocly ile doğrulandı
+        (yalnızca "security tanımlı değil" uyarıları — API bilinçli olarak kimliksiz,
+        kök `security: []` ile bu makine-okunur hâle getirildi)
+  - [x] **Spec binary'e gömülü** (`api/openapi/embed.go`, `go:embed`) ve `/openapi.yaml`
+        olarak sunuluyor (ETag + `If-None-Match` → 304). Dosyanın imaja ayrıca
+        kopyalanmış olmasına bağlı kalmak "compose up sonrası /docs çalışır" sözünü
+        kırılgan yapardı
+  - [x] **Swagger UI `/docs`**: varlıklar CDN'den SABİT sürümle (5.36.0) **ve SRI
+        `integrity` hash'iyle** geliyor — sürümü sabitlemek yalnızca etiketi sabitler,
+        içeriği sabitleyen şey hash. İnternet yoksa sayfa boş kalır ama `/openapi.yaml`
+        erişilebilir kalır (README'ye yazılacak). Hash'ler indirilip hesaplandı,
+        yenileme komutu `docs.go`'da yazılı
+  - [x] **Sapma testleri** (`internal/httpapi/docs_test.go`, Docker istemez):
+        (1) `chi.Walk` ile kayıtlı uçlar ↔ spec'in `paths`'i, (2) yanıt DTO'larının
+        json etiketleri ↔ şema `properties`'leri — yeni bir ALAN (ör. Scheduled'ın
+        `send_at`'i) dokümana yazılmazsa kırılır, (3) `errorCodes` dizisi ↔
+        `ErrorEnvelope.error.enum`, (4) `go/parser` ile `errors.go`'nun `ErrorCode`
+        sabitleri ↔ `errorCodes` dizisi (dizinin kendisi de kopya olmaktan çıkıyor)
+  - [x] OpenAPI'de `error` kodu enum'unu listele — tek kaynak: `internal/httpapi/errors.go`
   - [ ] README'de RFC 9457 (`problem+json`) yerine düz hata zarfının neden seçildiğini
         bir cümleyle açıkla
   - [ ] README'de SMS uzunluk kuralını (GSM-7 160 / Unicode 70) ve Türkçe karakterin

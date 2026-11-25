@@ -27,9 +27,10 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   Adım 9 (gözlemlenebilirlik: API'de tek `/metrics`, değerler DB'den — kuyruk
   derinliği, son 15 dk terminal sayımı, uçtan uca ve sağlayıcı gecikmesi yüzdelikleri,
   kopya başına devre kesici durumu; `internal/breakerstate`, `migrations/000005`),
-  CI (GitHub Actions: lint + `go test -race` + testcontainers)
-- **Devam eden: 3. gün teslimi.** Kalan sıra: **OpenAPI + Swagger UI** → Scheduled
-  bonusu → polish → **README**. Kapsam dışı bırakılanlar: WebSocket, Template,
+  CI (GitHub Actions: lint + `go test -race` + testcontainers),
+  **OpenAPI + Swagger UI** (`api/openapi/openapi.yaml` gömülü, `/openapi.yaml` + `/docs`,
+  dört sapma testi)
+- **Devam eden: 3. gün teslimi.** Kalan sıra: Scheduled bonusu → polish → **README**. Kapsam dışı bırakılanlar: WebSocket, Template,
   tracing, k6, Grafana.
 - **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu). Düzeltilenler:
   A grubu (`fix: close review defects blocking step 8` — `excerpt` rune kesmesi,
@@ -40,7 +41,7 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   **Kalan bulgular, düzeltme sırası, README'ye girecek maddeler ve teslim durumu
   `docs/review/findings.md` içinde** (gitignore'da; dosyanın başındaki **DEVİR**
   bölümü bir sonraki oturumun giriş noktasıdır).
-- **Henüz boş** (`.gitkeep`): `api`, `deploy`, `loadtest`
+- **Henüz boş** (`.gitkeep`): `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
   `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`,
   `curl localhost:8081/health/live` → `{"status":"alive"}` ve `docker compose ps -a` →
@@ -226,6 +227,30 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   saniyede tam 96, maks 96) — sınır hiç aşılmıyor; sağlayıcı isteği toplam 1000 (çift
   gönderim yok). Kanal izolasyonu: 562 SMS kuyrukta beklerken 5 e-posta 1.09 sn'de gitti.
 
+### API dokümantasyonu (OpenAPI adımında sabitlendi)
+
+- **Spec elle yazılır, koddan üretilmez** (`api/openapi/openapi.yaml`). Üretici araç
+  eklemek Go tiplerini sözleşmenin kaynağı yapardı; oysa sözleşme DTO'lardan daha
+  fazlasını söylüyor (202'nin gerekçesi, cursor'ın opaklığı, `[from, to)`).
+- **Spec `go:embed` ile binary'de** ve `/openapi.yaml`'dan sunuluyor (ETag → 304).
+  Paket `internal/` dışında çünkü embed kendi klasörünün dışına çıkamıyor; dışa açılan
+  tek şey bir `[]byte`. Klasör `api/openapi` olduğu için paket adı = import yolunun
+  son parçası.
+- **Swagger UI `/docs`: CDN + sabit sürüm + SRI.** Sürüm etiketi içeriği sabitlemiyor,
+  hash sabitliyor; eşleşmezse tarayıcı dosyayı hiç çalıştırmıyor. Bedeli: internetsiz
+  ortamda sayfa boş kalır — `/openapi.yaml` yine erişilebilir olduğu için kabul edildi.
+  Hash'ler uydurulmaz, `docs.go`'daki `openssl` komutuyla hesaplanır.
+- **Doküman sapması testle kapalı** (`internal/httpapi/docs_test.go`): uç listesi
+  `chi.Walk` ile, yanıt DTO'larının json etiketleri şema `properties`'leriyle,
+  hata kodları `errorCodes` dizisiyle, dizi de `go/parser` ile okunan `ErrorCode`
+  sabitleriyle karşılaştırılıyor. Uç eklemek YETMEZ: yeni bir alan da dokümana
+  yazılmadan testi geçmez.
+- **Uçlar sürümlü tabanın dışında** (`/docs`, `/openapi.yaml`): doküman API'nin bir
+  kaynağı değil, API'nin kendisinin açıklaması.
+- Dokümandaki `/health/live` gövdesi API'nin kendi yanıtı: `{"status":"ok"}`.
+  Yukarıdaki doğrulama satırındaki `{"status":"alive"}` 8081'deki **mockprovider**'a
+  ait; ikisi farklı servis.
+
 ## Modül ve klasörler
 
 Modül yolu: `github.com/XENWRLD/insider-notification-system`
@@ -244,6 +269,7 @@ Modül yolu: `github.com/XENWRLD/insider-notification-system`
 | `internal/provider` | Dış sağlayıcı HTTP client'ı |
 | `internal/ratelimit` | Redis GCRA kovası: kanal başına global hız sınırı |
 | `internal/breaker` | Kanal başına devre kesici (sony/gobreaker sarmalayıcısı) |
+| `api/openapi` | OpenAPI dokümanı + `go:embed` sarmalayıcısı (`internal/` dışındaki tek paket) |
 | `internal/observability` | Logger, metrikler |
 | `migrations` | golang-migrate dosyaları |
 

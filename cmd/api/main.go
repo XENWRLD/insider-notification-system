@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XENWRLD/insider-notification-system/api/openapi"
 	"github.com/XENWRLD/insider-notification-system/internal/bootstrap"
 	"github.com/XENWRLD/insider-notification-system/internal/breakerstate"
 	"github.com/XENWRLD/insider-notification-system/internal/config"
@@ -109,6 +110,8 @@ func run() error {
 		IdempotencyTTL:  cfg.IdempotencyTTL,
 
 		MetricsCollector: observability.NewCollector(notificationStore, breakerStates, logger),
+
+		OpenAPISpec: openapi.Spec,
 	})
 
 	server := &http.Server{

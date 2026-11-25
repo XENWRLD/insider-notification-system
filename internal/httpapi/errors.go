@@ -32,6 +32,28 @@ const (
 	CodeInternalError        ErrorCode = "internal_error"         // 500
 )
 
+// errorCodes, yukarıdaki kodların tamamı.
+//
+// Sabitler tek tek kullanılıyor ama OpenAPI dokümanındaki enum'un bu kümeyle aynı
+// olduğunu doğrulayabilmek için listenin çalışma zamanında da elimizde olması
+// gerekiyor (docs_test.go). Listeyi testin içine yazmak ikinci bir kopya olurdu ve
+// "koda ekle, dokümana eklemeyi unut" durumunu kaçırırdı.
+//
+// Yeni bir sabit eklenip buraya yazılmazsa TestErrorCodeConstantsAreAllListed
+// kırılır: o test errors.go'yu go/parser ile okuyup sabitleri bu dizinin içeriğiyle
+// karşılaştırıyor.
+var errorCodes = []ErrorCode{
+	CodeValidationFailed,
+	CodeInvalidJSON,
+	CodeUnsupportedMediaType,
+	CodePayloadTooLarge,
+	CodeInvalidCursor,
+	CodeNotFound,
+	CodeMethodNotAllowed,
+	CodeConflict,
+	CodeInternalError,
+}
+
 // errorResponse, tüm hata yanıtlarının gövdesi.
 //
 // RFC 9457 (application/problem+json) yerine bu düz zarf seçildi: istemci tarafında
