@@ -22,6 +22,25 @@ const (
 	PushMaxContentRunes = 512
 )
 
+// Zamanlanmış gönderim sınırları.
+const (
+	// ScheduleMaxHorizon, send_at'in en fazla ne kadar ileri olabileceği.
+	//
+	// Sınırsız bırakmak, kuyrukta yıllarca duracak satırların claim index'inde
+	// birikmesi demekti: index kısmi ve yalnızca pending/retrying tutuyor, yani
+	// "2030'a kurulmuş" bir kayıt her claim taramasının maliyetine kalıcı olarak
+	// eklenirdi.
+	ScheduleMaxHorizon = 30 * 24 * time.Hour
+
+	// ScheduleClockSkew, geçmiş kontrolünde tanınan tolerans.
+	//
+	// İstemci "şimdi" diye hesapladığı bir anı gönderdiğinde ağ gecikmesi ve
+	// istemci-sunucu saat farkı yüzünden değer sunucuya göre birkaç saniye geçmiş
+	// olabilir; bunu reddetmek, aslında geçerli olan bir isteği saat farkı yüzünden
+	// kırardı. Toleransın içinde kalan değer "hemen gönder" olarak işlenir.
+	ScheduleClockSkew = time.Minute
+)
+
 // e164Pattern, ITU-T E.164: '+' ardından sıfırla başlamayan en fazla 15 hane.
 var e164Pattern = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
 
@@ -66,6 +85,14 @@ type NewNotificationInput struct {
 	Recipient string
 	Content   string
 	Priority  string
+
+	// SendAt, zamanlanmış gönderim anı (RFC3339, saat dilimi zorunlu).
+	// Boşsa bildirim hemen gönderilebilir.
+	//
+	// Ayrıştırma da burada yapılıyor (httpapi'de değil): diğer alanlarla aynı yol,
+	// ve batch ucunda hata anahtarının "notifications[3].send_at" biçiminde
+	// öneklenmesi bu sayede bedavaya geliyor.
+	SendAt string
 }
 
 // NewNotification, girdiyi doğrular ve gönderilmeye hazır bir bildirim üretir.
@@ -108,6 +135,8 @@ func NewNotification(in NewNotificationInput) (*Notification, error) {
 		}
 	}
 
+	availableAt := validateSendAt(verr, in.SendAt)
+
 	if len(verr.Fields) > 0 {
 		return nil, verr
 	}
@@ -123,9 +152,55 @@ func NewNotification(in NewNotificationInput) (*Notification, error) {
 		AttemptCount: 0,
 		MaxAttempts:  DefaultMaxAttempts,
 
-		// Hemen gönderilebilir. Zamanlanmış bildirim (bonus) bu alanı ileri taşıyacak.
-		AvailableAt: time.Now().UTC(),
+		// Zamanlanmış değilse SIFIR bırakılır: o zaman damgasını veritabanı basar
+		// (store katmanı COALESCE ile now() uyguluyor). Uygulama saatini yazmak,
+		// claim sorgusu DB saatine baktığı için API ile Postgres farklı saatlerdeyse
+		// satırı görünmez yapıyordu — tek saat kaynağı DB.
+		AvailableAt: availableAt,
 	}, nil
+}
+
+// validateSendAt, zamanlanmış gönderim anını ayrıştırır ve sınırlara göre doğrular.
+//
+// Dönen sıfır değer "hemen" demektir: hem alan verilmediğinde hem de verilen an
+// tolerans içinde geçmiş olduğunda. Geçmiş bir anı sessizce "şimdi"ye çekmek yerine
+// reddetmek de bir seçenekti ama toleransın amacı tam olarak bu durumu kurtarmak.
+func validateSendAt(verr *ValidationError, raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+
+	sendAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		verr.add("send_at", "saat dilimi içeren RFC3339 biçiminde olmalı "+
+			"(örn. 2026-12-01T09:00:00+03:00); yalnızca tarih kabul edilmiyor")
+
+		return time.Time{}
+	}
+
+	now := time.Now().UTC()
+
+	if sendAt.Before(now.Add(-ScheduleClockSkew)) {
+		verr.add("send_at", "geçmiş bir an olamaz (en fazla %s tolerans)", ScheduleClockSkew)
+
+		return time.Time{}
+	}
+
+	if sendAt.After(now.Add(ScheduleMaxHorizon)) {
+		verr.add("send_at", "en fazla %d gün ileri olabilir",
+			int(ScheduleMaxHorizon.Hours()/24))
+
+		return time.Time{}
+	}
+
+	// Tolerans içindeki geçmiş an "hemen" olarak işlenir; ileri bir an UTC'ye
+	// çevrilerek saklanır (tek temsil).
+	if sendAt.Before(now) {
+		return time.Time{}
+	}
+
+	return sendAt.UTC()
 }
 
 // validateRecipient, alıcıyı kanalın kurallarına göre doğrular.

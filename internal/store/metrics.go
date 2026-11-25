@@ -26,7 +26,16 @@ import (
 // cevaplamıyor, yalnızca scrape'i pahalılaştırırdı.
 var activeStatuses = []string{"pending", "retrying", "processing"}
 
-// queueDepthQuery, kanal ve durum başına bekleyen iş sayısı.
+// queueDepthQuery, kanal, durum ve HAZIR OLMA durumuna göre iş sayısı.
+//
+// available_at ayrımı zorunlu: retry backoff'u ve zamanlanmış gönderim satırı
+// pending/retrying bırakıp available_at'i ileri taşıyor, yani "aktif satır" ile
+// "şimdi gönderilebilir iş" aynı şey değil. Ayrım olmasa gelecek haftaya kurulmuş
+// 10.000 bildirim, operatöre tıkanmış bir kuyruk gibi görünürdü.
+//
+// Partial index'ler bu koşulla bozulmuyor: available_at claim index'inin (channel,
+// priority_rank, available_at, id) içinde ve processing satırları tanım gereği
+// hiç 'deferred' olmuyor.
 //
 // Aktif küme sağlıklı bir sistemde küçük olduğu için planlayıcı Adım 2'nin kısmi
 // index'lerini (notifications_claim_idx ve notifications_lease_expiry_idx) bitmap ile
@@ -34,10 +43,10 @@ var activeStatuses = []string{"pending", "retrying", "processing"}
 // AKTİF satır sayısından geliyor. TestQueueDepthQueryAvoidsSeqScan bunu EXPLAIN ile
 // sabitliyor.
 const queueDepthQuery = `
-	SELECT status, channel, count(*)
+	SELECT status, channel, available_at > now() AS deferred, count(*)
 	FROM notifications
 	WHERE status = ANY($1)
-	GROUP BY status, channel`
+	GROUP BY status, channel, deferred`
 
 // terminalCountsQuery, son PENCERE içinde biten işlerin sayısı.
 //
@@ -103,6 +112,11 @@ type LabelledCount struct {
 	Status  string
 	Channel string
 	Count   int64
+
+	// Deferred, satırın zamanı HENÜZ GELMEDİĞİNİ söyler (available_at > now()):
+	// zamanlanmış gönderim ya da retry backoff'u bekleyen iş. Yalnızca kuyruk
+	// derinliği sorgusunda anlamlı.
+	Deferred bool
 }
 
 // Percentiles, bir gecikme dağılımının özeti. Count 0 ise pencere boş ve yüzdelikler
@@ -114,9 +128,38 @@ type Percentiles struct {
 	Count int64
 }
 
-// QueueDepth, aktif durumlardaki iş sayısını kanal ve durum başına döner.
+// QueueDepth, aktif durumlardaki iş sayısını kanal, durum ve hazır olma durumuna
+// göre döner.
+//
+// Kendi satır okuma döngüsü var (labelledCounts kullanılmıyor): yalnızca bu sorgu
+// dördüncü kolonu seçiyor ve ortak okuyucuya "bu çağrıda bir kolon daha var" bayrağı
+// geçirmek, iki satır tasarruf için çağrı yerinde okunamayan bir koşul üretirdi.
 func (s *Store) QueueDepth(ctx context.Context) ([]LabelledCount, error) {
-	return s.labelledCounts(ctx, queueDepthQuery, activeStatuses)
+	rows, err := s.pool.Query(ctx, queueDepthQuery, activeStatuses)
+	if err != nil {
+		return nil, fmt.Errorf("kuyruk derinliği okunamadı: %w", err)
+	}
+	defer rows.Close()
+
+	// Üst sınır: 3 aktif durum × 3 kanal × 2 (hazır/bekleyen).
+	counts := make([]LabelledCount, 0, 18)
+
+	for rows.Next() {
+		var count LabelledCount
+		if scanErr := rows.Scan(
+			&count.Status, &count.Channel, &count.Deferred, &count.Count,
+		); scanErr != nil {
+			return nil, fmt.Errorf("kuyruk derinliği çözülemedi: %w", scanErr)
+		}
+
+		counts = append(counts, count)
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("kuyruk derinliği okunamadı: %w", rows.Err())
+	}
+
+	return counts, nil
 }
 
 // TerminalCounts, verilen pencerede bitmiş işlerin sayısını döner.

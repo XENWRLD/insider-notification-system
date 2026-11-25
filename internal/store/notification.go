@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
@@ -17,19 +19,30 @@ import (
 //
 // RETURNING ile zaman damgaları veritabanından okunuyor; uygulama saati ile DB saati
 // arasındaki fark yanıta sızmasın ve istemci gerçekten kaydedilen değeri görsün.
+//
+// available_at COALESCE ile yazılıyor: zamanlanmamış bildirimde argüman NULL geçer ve
+// damgayı DB basar (batch yolundaki kuralla aynı — tek saat kaynağı DB). Daha önce
+// uygulama saati yazılıyordu ve claim sorgusu DB saatine baktığı için API ile Postgres
+// farklı saatlerdeyse satır bir süre görünmez kalıyordu. Zamanlanmış bildirimde ise
+// argüman doludur; o değer bir saat OKUMASI değil, istemcinin verdiği mutlak an.
 const createNotificationQuery = `
 	INSERT INTO notifications
 		(id, batch_id, channel, recipient, content, priority, status,
 		 attempt_count, max_attempts, available_at, correlation_id)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	RETURNING created_at, updated_at`
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::timestamptz, now()), $11)
+	RETURNING available_at, created_at, updated_at`
 
 // batchColumns, CopyFrom ile yazılan kolonlar.
 //
 // available_at, created_at ve updated_at bilerek YOK: veritabanı varsayılanı (now())
 // uygulanır, böylece toplu yazımda tek saat kaynağı DB olur. priority_rank ise
 // GENERATED ALWAYS olduğu için verilemez.
-// (Zamanlanmış bildirim bonusu geldiğinde available_at bu listeye eklenecek.)
+//
+// Zamanlanmış öğeler bu listeye available_at EKLENEREK çözülmedi: COPY satır başına
+// "varsayılanı uygula" diyemiyor (NULL geçmek NOT NULL kısıtını ihlal eder), yani
+// karışık bir batch'te zamanlanmamış satırlara uygulama saatini yazmak zorunda
+// kalırdık. Bunun yerine COPY'den sonra aynı transaction'da yalnızca zamanlanmış
+// satırlar tek UPDATE ile güncelleniyor (scheduleBatchQuery).
 var batchColumns = []string{
 	"id", "batch_id", "channel", "recipient", "content", "priority",
 	"status", "attempt_count", "max_attempts", "correlation_id",
@@ -57,9 +70,9 @@ func (s *Store) CreateNotification(
 			string(n.Status),
 			n.AttemptCount,
 			n.MaxAttempts,
-			n.AvailableAt,
+			nullableTime(n.AvailableAt),
 			n.CorrelationID,
-		).Scan(&n.CreatedAt, &n.UpdatedAt)
+		).Scan(&n.AvailableAt, &n.CreatedAt, &n.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("bildirim eklenemedi: %w", err)
 		}
@@ -106,8 +119,67 @@ func (s *Store) CreateBatch(
 			return fmt.Errorf("batch eksik yazıldı: %d/%d", copied, len(notifications))
 		}
 
-		return nil
+		return scheduleBatch(ctx, tx, notifications)
 	}, renderResponse)
+}
+
+// scheduleBatchQuery, zamanlanmış batch satırlarının available_at'ini düzeltir.
+//
+// Tek statement, iki dizi: unnest ile kimlik–zaman çiftleri satıra çevrilip tek
+// UPDATE ile yazılıyor. Satır başına bir UPDATE, 1000 öğeli bir batch'te COPY'nin
+// kazandırdığı her şeyi geri verirdi.
+const scheduleBatchQuery = `
+	UPDATE notifications AS n
+	SET available_at = s.send_at
+	FROM unnest($1::uuid[], $2::timestamptz[]) AS s(id, send_at)
+	WHERE n.id = s.id`
+
+// scheduleBatch, batch içindeki zamanlanmış satırların available_at'ini yazar.
+//
+// Hiç zamanlanmış satır yoksa sorgu HİÇ çalışmaz: zamanlanmış bildirim istisnai durum,
+// olağan batch yolunun maliyeti artmasın.
+func scheduleBatch(ctx context.Context, tx pgx.Tx, notifications []*domain.Notification) error {
+	ids := make([]uuid.UUID, 0, len(notifications))
+	times := make([]time.Time, 0, len(notifications))
+
+	for _, n := range notifications {
+		if n.AvailableAt.IsZero() {
+			continue
+		}
+
+		ids = append(ids, n.ID)
+		times = append(times, n.AvailableAt)
+	}
+
+	if len(ids) == 0 {
+		return nil
+	}
+
+	tag, err := tx.Exec(ctx, scheduleBatchQuery, ids, times)
+	if err != nil {
+		return fmt.Errorf("zamanlanmış batch satırları yazılamadı: %w", err)
+	}
+
+	// Satır sayısı tutmuyorsa COPY ile UPDATE arasında bir şey tutarsız: sessizce
+	// devam etmek, istemciye "kabul edildi" deyip bazı mesajları yanlış zamanda
+	// göndermek olurdu.
+	if tag.RowsAffected() != int64(len(ids)) {
+		return fmt.Errorf("zamanlanmış satır sayısı tutmuyor: %d/%d",
+			tag.RowsAffected(), len(ids))
+	}
+
+	return nil
+}
+
+// nullableTime, sıfır zamanı NULL'a çevirir.
+//
+// Sıfır değer "veritabanı damgalasın" anlamına geliyor (bkz. createNotificationQuery).
+func nullableTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+
+	return &value
 }
 
 // runIdempotent, verilen işi idempotency koruması altında tek transaction'da çalıştırır.

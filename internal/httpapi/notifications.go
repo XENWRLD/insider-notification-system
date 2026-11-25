@@ -77,11 +77,13 @@ type notificationHandler struct {
 // createNotificationRequest, tekil oluşturma gövdesi ve batch öğelerinin biçimi.
 //
 // priority isteğe bağlı; verilmezse domain katmanı "normal" uygular.
+// send_at isteğe bağlı; verilmezse bildirim hemen gönderilir.
 type createNotificationRequest struct {
 	Channel   string `json:"channel"`
 	Recipient string `json:"recipient"`
 	Content   string `json:"content"`
 	Priority  string `json:"priority"`
+	SendAt    string `json:"send_at"`
 }
 
 // toDomainInput, HTTP biçimini domain girdisine çevirir.
@@ -91,6 +93,7 @@ func (r createNotificationRequest) toDomainInput() domain.NewNotificationInput {
 		Recipient: r.Recipient,
 		Content:   r.Content,
 		Priority:  r.Priority,
+		SendAt:    r.SendAt,
 	}
 }
 

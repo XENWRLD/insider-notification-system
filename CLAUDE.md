@@ -30,7 +30,9 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   CI (GitHub Actions: lint + `go test -race` + testcontainers),
   **OpenAPI + Swagger UI** (`api/openapi/openapi.yaml` gömülü, `/openapi.yaml` + `/docs`,
   dört sapma testi)
-- **Devam eden: 3. gün teslimi.** Kalan sıra: Scheduled bonusu → polish → **README**. Kapsam dışı bırakılanlar: WebSocket, Template,
+  **Scheduled bonusu** (`send_at`, migration'sız; F12 düzeltmesi ve `queue_depth`
+  ayrımı dâhil)
+- **Devam eden: 3. gün teslimi.** Kalan sıra: polish → **README**. Kapsam dışı bırakılanlar: WebSocket, Template,
   tracing, k6, Grafana.
 - **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu). Düzeltilenler:
   A grubu (`fix: close review defects blocking step 8` — `excerpt` rune kesmesi,
@@ -226,6 +228,32 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 - **Ölçüm:** 1000 SMS → 1 worker 12.1 sn (maks 98/sn), 3 worker 10.9 sn (her tam
   saniyede tam 96, maks 96) — sınır hiç aşılmıyor; sağlayıcı isteği toplam 1000 (çift
   gönderim yok). Kanal izolasyonu: 562 SMS kuyrukta beklerken 5 e-posta 1.09 sn'de gitti.
+
+### Zamanlanmış gönderim (Scheduled bonusunda sabitlendi)
+
+- **Yeni kolon/migration yok:** `send_at` → `available_at`. Normal gönderim, retry
+  gecikmesi ve zamanlanmış gönderim tek mekanizma; claim sorgusu değişmedi.
+- **Zamanlanmış kayıt `pending` bekler**, ayrı durum yok → zamanı gelmeden iptal
+  edilebilir.
+- **Ayrıştırma domain'de** (`validateSendAt`): batch hata anahtarının
+  `notifications[1].send_at` olarak öneklenmesi bu sayede bedava.
+- **Sınırlar:** dilimli RFC3339 zorunlu, maks 30 gün ileri (`ScheduleMaxHorizon`),
+  geçmiş reddedilir ama 1 dk tolerans (`ScheduleClockSkew`) — tolerans içindeki değer
+  "hemen" sayılır.
+- **`AvailableAt` sıfır = "damgayı DB bassın".** Tekil INSERT
+  `COALESCE($10::timestamptz, now())` + `RETURNING available_at`; eskiden uygulama
+  saati yazılıyordu ve claim DB saatine baktığı için iki saat farklıysa satır bir süre
+  görünmez kalıyordu (review bulgusu F12). Artık tekil ve batch aynı saat kaynağında.
+- **Batch:** COPY satır başına varsayılan uygulayamadığı için zamanlanmış satırlar
+  COPY'den sonra aynı transaction'da `unnest(uuid[], timestamptz[])` ile TEK UPDATE
+  ile düzeltiliyor; hiç zamanlanmış satır yoksa sorgu hiç çalışmıyor.
+- **`queue_depth` ikiye ayrıldı:** `notifications_queue_depth` = şimdi gönderilebilir
+  iş (alarm buna kurulur), `notifications_deferred_depth` = zamanı gelmemiş iş
+  (zamanlanmış veya retry backoff'u). Tek sorgu, `GROUP BY ... available_at > now()`;
+  partial index korunuyor (EXPLAIN: `Index Scan`, 18 buffer).
+- **Orijinal hedef an retry'dan sonra kaybolur** (`available_at` backoff'a kayar).
+  İkinci bir kolon açmak iki saat kaynağı yaratacağı için YAPILMADI; README'de bilinen
+  sınır olarak yazılacak. İlk gönderim anı `notification_attempts`'te duruyor.
 
 ### API dokümantasyonu (OpenAPI adımında sabitlendi)
 

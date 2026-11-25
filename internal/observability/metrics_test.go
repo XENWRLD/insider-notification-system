@@ -50,6 +50,9 @@ func (s *stubMetricsStore) QueueDepth(context.Context) ([]store.LabelledCount, e
 	return []store.LabelledCount{
 		{Status: "pending", Channel: "sms", Count: 12},
 		{Status: "processing", Channel: "email", Count: 3},
+		// Zamanı gelmemiş satırlar (zamanlanmış gönderim / retry backoff'u):
+		// ayrı bir metriğe gitmeli.
+		{Status: "pending", Channel: "sms", Count: 10000, Deferred: true},
 	}, nil
 }
 
@@ -141,6 +144,22 @@ func TestCollectorPublishesAllMetrics(t *testing.T) {
 	require.Contains(t, output, `notifications_breaker_state{channel="sms",worker="worker-1"} 2`)
 	require.Contains(t, output, `notifications_breaker_state{channel="email",worker="worker-1"} 0`)
 	require.Contains(t, output, "notifications_metrics_collect_errors 0")
+}
+
+// TestCollectorSeparatesDeferredQueueDepth, zamanı gelmemiş satırların kuyruk
+// derinliğine KARIŞMADIĞINI doğrular.
+//
+// Olmasa: gelecek haftaya kurulmuş 10.000 bildirim queue_depth'e eklenir ve operatör
+// tıkanmış bir kuyruk görürdü. Alarm queue_depth'e kuruluyor, bu yüzden ayrım metrik
+// adında olmak zorunda.
+func TestCollectorSeparatesDeferredQueueDepth(t *testing.T) {
+	t.Parallel()
+
+	output := gather(t, NewCollector(&stubMetricsStore{}, nil, discardLogger()))
+
+	require.Contains(t, output, `notifications_deferred_depth{channel="sms",status="pending"} 10000`)
+	require.Contains(t, output, `notifications_queue_depth{channel="sms",status="pending"} 12`)
+	require.NotContains(t, output, `notifications_queue_depth{channel="sms",status="pending"} 10000`)
 }
 
 // TestCollectorCachesResults, 5 saniyelik önbelleğin ikinci scrape'te sorgu

@@ -90,6 +90,7 @@ type Collector struct {
 	cached *snapshot
 
 	queueDepth     *prometheus.Desc
+	deferredDepth  *prometheus.Desc
 	terminalTotal  *prometheus.Desc
 	endToEnd       *prometheus.Desc
 	providerCall   *prometheus.Desc
@@ -110,7 +111,15 @@ func NewCollector(
 
 		queueDepth: prometheus.NewDesc(
 			"notifications_queue_depth",
-			"Gönderilmeyi bekleyen veya işlenen bildirim sayısı (yalnızca aktif durumlar).",
+			"ŞİMDİ gönderilebilir veya işlenmekte olan bildirim sayısı "+
+				"(aktif durumlar, available_at <= now()). Alarm bu metriğe kurulur.",
+			[]string{"status", "channel"}, nil),
+
+		deferredDepth: prometheus.NewDesc(
+			"notifications_deferred_depth",
+			"Zamanı henüz gelmemiş bildirim sayısı (available_at > now()): zamanlanmış "+
+				"gönderim veya retry backoff'u. Tıkanıklık DEĞİL; queue_depth ile toplamı "+
+				"aktif satır sayısını verir.",
 			[]string{"status", "channel"}, nil),
 
 		terminalTotal: prometheus.NewDesc(
@@ -149,6 +158,7 @@ func NewCollector(
 // Describe, Prometheus arayüzünün gerektirdiği tanım listesi.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.queueDepth
+	ch <- c.deferredDepth
 	ch <- c.terminalTotal
 	ch <- c.endToEnd
 	ch <- c.providerCall
@@ -166,7 +176,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	snap := c.load()
 
 	for _, count := range snap.queue {
-		ch <- prometheus.MustNewConstMetric(c.queueDepth, prometheus.GaugeValue,
+		desc := c.queueDepth
+		if count.Deferred {
+			desc = c.deferredDepth
+		}
+
+		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue,
 			float64(count.Count), count.Status, count.Channel)
 	}
 

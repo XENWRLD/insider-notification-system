@@ -100,6 +100,10 @@ type Notification struct {
 
 	// AvailableAt, işin çekilebilir hâle geldiği an. Normal gönderim, retry gecikmesi
 	// ve zamanlanmış bildirim aynı alan üzerinden çalışır.
+	//
+	// Yeni bir bildirimde SIFIR olabilir: "hemen gönderilebilir, damgayı veritabanı
+	// bassın" demektir (store COALESCE ile now() uyguluyor ve değeri RETURNING ile
+	// geri yazıyor). Veritabanından okunan bir kayıtta her zaman doludur.
 	AvailableAt time.Time
 
 	// Lease: işi çeken worker'ın süreli sahipliği. İkisi birlikte dolu ya da birlikte

@@ -62,7 +62,11 @@ func TestNewNotificationValidInputs(t *testing.T) {
 			require.Zero(t, notification.AttemptCount)
 			require.Equal(t, DefaultMaxAttempts, notification.MaxAttempts)
 			require.NotEqual(t, "00000000-0000-0000-0000-000000000000", notification.ID.String())
-			require.False(t, notification.AvailableAt.IsZero())
+			// available_at SIFIR: zamanlanmamış bildirimde damgayı veritabanı basar
+			// (store COALESCE ile now() uyguluyor). Uygulama saatini yazmak, claim
+			// sorgusu DB saatine baktığı için iki saat farklıysa satırı bir süre
+			// görünmez yapıyordu.
+			require.True(t, notification.AvailableAt.IsZero())
 
 			// Lease boş: işi henüz kimse çekmedi.
 			require.Nil(t, notification.LeaseToken)

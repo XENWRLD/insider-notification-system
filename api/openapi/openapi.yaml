@@ -65,6 +65,9 @@ paths:
         `Idempotency-Key` verilirse aynı anahtar + aynı gövde ile gelen tekrar
         istekleri yeni kayıt oluşturmaz; saklanan cevap `Idempotent-Replay: true`
         ile aynen döner.
+
+        `send_at` verilirse bildirim o ana kadar kuyrukta bekler; verilmezse hemen
+        gönderilir.
       operationId: createNotification
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -445,7 +448,12 @@ paths:
       description: |
         Değerler veritabanından türetilir (kuyruk derinliği, son 15 dakikanın terminal
         sayımları, uçtan uca ve sağlayıcı gecikmesi yüzdelikleri) ve devre kesici
-        durumu Redis'ten okunur. Worker'lar kendi portunu açmaz; bu yüzden değerler
+        durumu Redis'ten okunur.
+
+        `notifications_queue_depth` yalnızca ŞİMDİ gönderilebilir işi sayar; zamanı
+        gelmemiş satırlar (zamanlanmış gönderim veya retry backoff'u)
+        `notifications_deferred_depth` altında durur — gelecek haftaya kurulmuş
+        bildirimler tıkanmış bir kuyruk gibi görünmesin. Worker'lar kendi portunu açmaz; bu yüzden değerler
         counter değil **gauge**'dur ve adlandırma bunu söyler.
 
         Uç kimliksiz olduğu için korumalı: 5 saniyelik önbellek + singleflight,
@@ -796,6 +804,23 @@ components:
           example: Flash sale basladi
         priority:
           $ref: '#/components/schemas/Priority'
+        send_at:
+          type: string
+          format: date-time
+          description: |
+            Zamanlanmış gönderim anı. Saat dilimi içeren RFC3339 zorunlu
+            (`2026-12-01T09:00:00+03:00`); yalnızca tarih reddedilir. Verilmezse
+            bildirim hemen gönderilir.
+
+            En fazla **30 gün** ileri olabilir. Geçmiş bir an reddedilir; istemci ile
+            sunucu saat farkını kurtarmak için 1 dakikalık tolerans tanınır ve
+            toleransın içindeki değer "hemen" olarak işlenir.
+
+            Zamanlanmış kayıt `pending` durumunda bekler (ayrı bir durum yoktur),
+            yani zamanı gelmeden **iptal edilebilir**. Zaman `available_at` alanında
+            görünür; ilk retry'dan sonra `available_at` backoff'a göre değiştiği için
+            orijinal hedef an artık okunamaz (bilinçli tercih — bkz. README).
+          example: "2026-12-01T09:00:00+03:00"
 
     BatchCreateRequest:
       type: object
@@ -880,8 +905,9 @@ components:
           type: string
           format: date-time
           description: |
-            Kaydın ne zaman çekilebilir olduğu. Retry gecikmesi, normal gönderim ve
-            (bonus) zamanlanmış gönderim aynı alanı kullanır.
+            Kaydın ne zaman çekilebilir olduğu. Normal gönderim, `send_at` ile
+            zamanlanmış gönderim ve retry gecikmesi aynı alanı kullanır — tek
+            mekanizma. Zamanlanmamış kayıtta damgayı veritabanı basar.
         provider_message_id:
           type: string
           description: Sağlayıcının verdiği kimlik; yanıt gövdesi çözülemediyse yoktur.

@@ -378,7 +378,35 @@ duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
 
 ### 3. Gün — Bonuslar, kalite, teslim
 - [ ] **Testler + CI:** kalan testler, `make test`, GitHub Actions → `ci: add GitHub Actions pipeline`
-- [ ] **Bonus — Scheduled:** `send_at` → `feat: support scheduled notifications`
+- [x] **Bonus — Scheduled:** `send_at` → `feat: support scheduled notifications`
+  - [x] **Yeni migration YOK:** §2'nin "tek `available_at`" kararı bunu zaten
+        karşılıyor — zamanlanmış gönderim = `available_at = send_at`, claim sorgusu
+        (`available_at <= now()`) değişmedi. Satır `pending` beklediği için zamanı
+        gelmeden **iptal edilebiliyor**
+  - [x] `send_at` ayrıştırması **domain'de** (httpapi'de değil): diğer alanlarla aynı
+        yol ve batch ucunda hata anahtarının `notifications[1].send_at` olarak
+        öneklenmesi bedavaya geliyor
+  - [x] Sınırlar: saat dilimli RFC3339 zorunlu, en fazla **30 gün** ileri (sınırsız
+        bırakmak claim index'inde kalıcı birikme demekti), geçmiş an reddedilir ama
+        **1 dakika tolerans** var (istemci-sunucu saat farkı geçerli bir isteği
+        kırmasın; tolerans içindeki değer "hemen" olarak işlenir)
+  - [x] **F12 düzeltildi (aynı kodu elliyordu):** zamanlanmamış kayıtta `available_at`
+        artık uygulama saatiyle değil `COALESCE($10, now())` + `RETURNING` ile
+        DB tarafından damgalanıyor — tekil ve batch yolu aynı saat kaynağını kullanıyor.
+        Ölçüm: `available_at == created_at` (canlı)
+  - [x] **Batch'te COPY + tek UPDATE:** COPY satır başına "varsayılanı uygula"
+        diyemiyor (NULL, NOT NULL kısıtını ihlal eder), bu yüzden karışık batch'te
+        yalnızca zamanlanmış satırlar aynı transaction'da `unnest(...)` ile tek
+        UPDATE'le düzeltiliyor; satır başına UPDATE, COPY'nin kazancını geri verirdi
+  - [x] **`queue_depth` ikiye ayrıldı:** `notifications_queue_depth` yalnızca ŞİMDİ
+        gönderilebilir işi sayıyor, zamanı gelmemiş satırlar
+        `notifications_deferred_depth` altında. Sebep scheduled'dan eski: retry
+        backoff'u da `available_at`'i ileri taşıyor. Tek sorgu
+        (`GROUP BY status, channel, available_at > now()`), EXPLAIN ile doğrulandı —
+        20.000 terminal + 50 aktif satırda `Index Scan`, 18 buffer
+  - [x] **Ölçüm (canlı):** 30 sn ileriye kurulan bildirim zamanı gelmeden `pending`
+        ve `/metrics`te `deferred_depth`; hedef andan **153 ms** sonra `sent`.
+        Karışık batch: biri `sent`, zamanlanmış olan `pending`
 - [ ] **Bonus — Template:** `text/template`, değişken yerleştirme → `feat: add template system`
 - [ ] **Bonus — WebSocket:** Redis pub/sub → `/ws` → `feat: add websocket status updates`
 - [ ] **Kanıt:** k6 yük testi, Prometheus + Grafana paneli → `chore: add load test and dashboards`
