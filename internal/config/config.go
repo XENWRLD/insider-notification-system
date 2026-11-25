@@ -126,13 +126,18 @@ func Load() (Config, error) {
 		ProviderURL: os.Getenv("PROVIDER_URL"),
 	}
 
+	// PROVIDER_URL bu listede YOK ve bu bilinçli: değeri yalnızca worker kullanıyor,
+	// API sağlayıcıya hiç gitmiyor. Kullanmadığı bir değişken yüzünden API'nin
+	// açılmaması, ".env olmadan `docker compose up` çalışmıyor" demekti — oysa
+	// teslim şartı tek komutla kurulum. Worker tarafında kontrol kaybolmuyor:
+	// provider.New boş adresi açılışta reddediyor ("sağlayıcı adresi boş olamaz"),
+	// yani "yanlış ayar process'i hemen durdurur" kuralı yerinde kalıyor.
 	for _, required := range []struct {
 		name  string
 		value string
 	}{
 		{"DATABASE_URL", cfg.DatabaseURL},
 		{"REDIS_URL", cfg.RedisURL},
-		{"PROVIDER_URL", cfg.ProviderURL},
 	} {
 		if strings.TrimSpace(required.value) == "" {
 			problems = append(problems, required.name+" zorunlu")

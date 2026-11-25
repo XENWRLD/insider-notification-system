@@ -32,7 +32,6 @@ func TestLoadAppliesDefaults(t *testing.T) {
 func TestLoadReportsAllMissingRequiredValuesAtOnce(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("REDIS_URL", "")
-	t.Setenv("PROVIDER_URL", "")
 
 	_, err := Load()
 	require.Error(t, err)
@@ -40,7 +39,22 @@ func TestLoadReportsAllMissingRequiredValuesAtOnce(t *testing.T) {
 	// Tek seferde tüm eksikler bildirilir; kullanıcı her denemede bir hata görmez.
 	require.Contains(t, err.Error(), "DATABASE_URL")
 	require.Contains(t, err.Error(), "REDIS_URL")
-	require.Contains(t, err.Error(), "PROVIDER_URL")
+}
+
+// TestLoadDoesNotRequireProviderURL, sağlayıcı adresinin API için zorunlu
+// OLMADIĞINI doğrular.
+//
+// Gerekçe: API sağlayıcıya hiç gitmiyor. Kullanmadığı bir değişkeni zorunlu tutmak,
+// ".env olmadan `docker compose up` çalışmıyor" demekti ve teslim şartı tek komutluk
+// kurulum. Worker tarafında kontrol provider.New'de duruyor (boş adres = açılış hatası).
+func TestLoadDoesNotRequireProviderURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
+	t.Setenv("REDIS_URL", "redis://localhost:6379/0")
+	t.Setenv("PROVIDER_URL", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.ProviderURL)
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {

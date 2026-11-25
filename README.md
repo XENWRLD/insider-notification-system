@@ -20,8 +20,16 @@ correlation ID from the API through the database into the worker logs.
 ```bash
 git clone https://github.com/XENWRLD/insider-notification-system.git
 cd insider-notification-system
-cp .env.example .env          # or: make env
 docker compose up --build -d  # postgres + redis + migrate + api + worker + mock provider
+```
+
+That is the whole setup — no `.env` required. Compose supplies every mandatory value
+for the containers, and the file is read only if it exists
+(`env_file: [{path: .env, required: false}]`). Copy it when you want to change
+defaults — worker tuning, limits, or pointing at a real provider:
+
+```bash
+cp .env.example .env   # or: make env
 ```
 
 Send one notification and watch it get delivered:

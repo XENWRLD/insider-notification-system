@@ -23,7 +23,7 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   Adım 8 (retry politikası + kanal başına circuit breaker: `internal/breaker`,
   `store.DeferLeases`, `classify.go` yeniden yazımı, iki breaker kapısı + claimer
   kapısı, claim sorgusunun kapanıştan muafiyeti; dört commit — onaylı plan
-  `docs/plans/adim-08-plan.md`)
+  `docs/plans/adim-08-plan.md` — yerelde, gitignore'da)
   Adım 9 (gözlemlenebilirlik: API'de tek `/metrics`, değerler DB'den — kuyruk
   derinliği, son 15 dk terminal sayımı, uçtan uca ve sağlayıcı gecikmesi yüzdelikleri,
   kopya başına devre kesici durumu; `internal/breakerstate`, `migrations/000005`),

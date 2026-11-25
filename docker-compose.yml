@@ -91,7 +91,13 @@ services:
       context: .
       args:
         CMD: api
-    env_file: .env
+    # .env İSTEĞE BAĞLI (required: false): teslim şartı `docker compose up` ile tek
+    # komutluk kurulum, dolayısıyla dosya yokken yığın yine ayağa kalkmalı. Aşağıdaki
+    # environment bloğu container içindeki tüm zorunlu değerleri zaten veriyor; .env
+    # varsa onun değerleri yalnızca ek ayarlar (worker tuningi, limitler) için okunur.
+    env_file:
+      - path: .env
+        required: false
     environment:
       # Container ağı içindeki adresler .env'deki değerleri ezer: aynı .env hem
       # host'tan (make run) hem compose içinden çalışsın.
@@ -133,7 +139,13 @@ services:
       context: .
       args:
         CMD: worker
-    env_file: .env
+    # .env İSTEĞE BAĞLI (required: false): teslim şartı `docker compose up` ile tek
+    # komutluk kurulum, dolayısıyla dosya yokken yığın yine ayağa kalkmalı. Aşağıdaki
+    # environment bloğu container içindeki tüm zorunlu değerleri zaten veriyor; .env
+    # varsa onun değerleri yalnızca ek ayarlar (worker tuningi, limitler) için okunur.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-insider}:${POSTGRES_PASSWORD:-insider}@postgres:5432/${POSTGRES_DB:-notifications}?sslmode=disable
       REDIS_URL: redis://redis:6379/0
