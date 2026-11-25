@@ -32,7 +32,8 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   dört sapma testi)
   **Scheduled bonusu** (`send_at`, migration'sız; F12 düzeltmesi ve `queue_depth`
   ayrımı dâhil)
-- **Devam eden: 3. gün teslimi.** Kalan sıra: polish → **README**. Kapsam dışı bırakılanlar: WebSocket, Template,
+  ve **polish** (review bulguları F06, F08, F09, F13, F14, F19, F42)
+- **Devam eden: 3. gün teslimi.** Kalan sıra: **README** → son prova. Kapsam dışı bırakılanlar: WebSocket, Template,
   tracing, k6, Grafana.
 - **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu). Düzeltilenler:
   A grubu (`fix: close review defects blocking step 8` — `excerpt` rune kesmesi,
@@ -228,6 +229,26 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 - **Ölçüm:** 1000 SMS → 1 worker 12.1 sn (maks 98/sn), 3 worker 10.9 sn (her tam
   saniyede tam 96, maks 96) — sınır hiç aşılmıyor; sağlayıcı isteği toplam 1000 (çift
   gönderim yok). Kanal izolasyonu: 562 SMS kuyrukta beklerken 5 e-posta 1.09 sn'de gitti.
+
+### Polish kararları (review bulguları)
+
+- **Panik yanıtı da hata zarfı kullanır:** chi'nin `Recoverer`'ı yerine
+  `httpapi.recoverer` — hazırı gövdesiz 500 dönüyor ve yığını ANSI'li olarak stderr'e
+  basıyordu. `http.ErrAbortHandler` bilinçli olarak yeniden paniklendirilir.
+- **JSON çözümleme hatası çevrilir, aktarılmaz** (`decodeErrorMessage`): ham metin iç
+  DTO adlarını sızdırıyor ve onları fiilî sözleşmeye çeviriyordu.
+- **`batchTimeout` < `WriteTimeout`** (20s < 30s): write deadline istek header'ıyla
+  başlıyor, eşitlik hâlinde 500 zarfı flush edilemiyordu.
+- **Sayaç ayarlarının üst sınırı var** (`config.MaxCountValue`): değerler aşağı akışta
+  int32'ye dönüşüyor ve Go'da dönüşüm sessizce taşıyor. Yanlış ayar artık açılışta
+  durduruyor.
+- **Sağlayıcı idle havuzu `len(domain.AllChannels()) × WORKER_CONCURRENCY`:** üç kanal
+  havuzu aynı client'ı paylaşıyor. `domain.AllChannels()` bu iki yerin tek kaynağı.
+- **Kapanış sessiz olmalı:** reaper/janitor tek `tickLoop`'tan koşuyor ve tick dalının
+  içinde `ctx.Err()` kontrolü var; izin hatası kapanışta DEBUG, gerçek arızada ERROR.
+  `tickLoop` tick kanalını dışarıdan alıyor — yarışı determinist test etmenin tek yolu
+  bu (gerçek `time.Ticker` ile tick select'e varılmadan hazır olmuyor ve test yarışı
+  hiç görmüyordu).
 
 ### Zamanlanmış gönderim (Scheduled bonusunda sabitlendi)
 

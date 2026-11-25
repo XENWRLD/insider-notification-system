@@ -271,6 +271,20 @@ func envBytes(key string, fallback int64) (int64, error) {
 	return parsed, nil
 }
 
+// MaxCountValue, sayma amaçlı değişkenlerin üst sınırı.
+//
+// Üst sınır ZORUNLU, yalnızca "pozitif olmalı" demek yetmiyordu: bu değerler
+// aşağı akışta int32'ye dönüştürülüyor (pgxpool.MaxConns) ve Go'da dönüşüm sessizce
+// taşıyor. WORKER_DB_MAX_CONNS=4294967296 → int32(0) → havuz pgx varsayılanına
+// sessizce düşerken açılış logu hâlâ 4294967296 yazıyordu; =4294967297 → int32(1) →
+// bütün sender'lar tek bağlantı için yarışıyor ve gönderilmiş mesajların sonucu
+// yazılamıyordu (review bulgusu F14). Sınır, paketin kendi kuralını da uyguluyor:
+// yanlış ayar process'i AÇILIŞTA durdurur, sessizce bozulmaz.
+//
+// Değer bilinçli olarak cömert: buradaki hiçbir sayaç için makul üst sınır bu
+// büyüklüğe yaklaşmıyor, yani sınır yalnızca saçma değerleri kesiyor.
+const MaxCountValue = 1_000_000
+
 // envInt, sayma amaçlı bir tamsayı değişkenini okur (eşzamanlılık, parti boyutu).
 //
 // envBytes'ın aynısı ama int döner ve hata mesajı "bayt" demez: yanlış mesaj,
@@ -287,6 +301,9 @@ func envInt(key string, fallback int) (int, error) {
 	}
 	if parsed <= 0 {
 		return fallback, fmt.Errorf("%s pozitif olmalı: %q", key, raw)
+	}
+	if parsed > MaxCountValue {
+		return fallback, fmt.Errorf("%s en fazla %d olabilir: %q", key, MaxCountValue, raw)
 	}
 
 	return parsed, nil

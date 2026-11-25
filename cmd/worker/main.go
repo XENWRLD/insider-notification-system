@@ -53,7 +53,10 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := bootstrap.OpenPostgres(ctx, logger, cfg.DatabaseURL, int32(cfg.WorkerDBMaxConns)) //nolint:gosec // yapılandırmadan gelen küçük pozitif sayı
+	// int32 dönüşümü güvenli: config.envInt değeri (0, MaxCountValue] aralığında
+	// zorluyor ve MaxCountValue int32'ye rahat sığıyor. Sınır olmadan dönüşüm sessizce
+	// taşıyordu (F14) — yanlış ayar artık açılışta hata veriyor.
+	pool, err := bootstrap.OpenPostgres(ctx, logger, cfg.DatabaseURL, int32(cfg.WorkerDBMaxConns)) //nolint:gosec // config.MaxCountValue ile sınırlı
 	if err != nil {
 		return err
 	}
@@ -87,7 +90,14 @@ func run() error {
 		// Bağlantı havuzu eşzamanlı gönderim sayısına eşitlenir: Go'nun varsayılanı
 		// host başına 2 idle bağlantı ve saniyede yüzlerce gönderimde neredeyse her
 		// istek yeni bir TCP (ve TLS) el sıkışmasına girerdi.
-		MaxIdleConnsPerHost: cfg.WorkerConcurrency,
+		//
+		// Çarpan ZORUNLU: her kanal kendi havuzunda WORKER_CONCURRENCY sender
+		// çalıştırıyor ve üç havuz AYNI provider.Client üzerinden aynı host'a gidiyor
+		// → uçan istek sayısı kanal × concurrency. Yalnızca concurrency verilirse
+		// yanıtların 2/3'ü idle havuzu dolu bulup bağlantıyı kapatıyor ve bu alanın
+		// kaldırmak için eklendiği el sıkışma maliyeti geri geliyordu (F06; Adım 6-7
+		// ölçümleri tek kanalla yapıldığı için görünmemişti).
+		MaxIdleConnsPerHost: len(domain.AllChannels()) * cfg.WorkerConcurrency,
 	}, logger)
 	if err != nil {
 		return err

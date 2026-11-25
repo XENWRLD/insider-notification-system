@@ -23,7 +23,14 @@ const (
 
 	// batchTimeout, 1000 satırlık toplu yazıma tanınan süre. Tekil yazımdan uzun:
 	// CopyFrom hızlı ama 1000 satır yine de daha fazla iş.
-	batchTimeout = 30 * time.Second
+	//
+	// WriteTimeout'tan (30 sn) belirgin biçimde kısa — eşit olmak kuralın tek istisnası
+	// olarak kalmıştı ve tam da yorumun engellediğini söylediği sonucu üretiyordu: Go
+	// write deadline'ını istek HEADER'ı okunur okunmaz kuruyor, yani 16 MiB'lik bir
+	// gövdenin okunması o bütçeden harcanıyor ve sorgu takıldığında 500 zarfı artık
+	// flush edilemiyor; istemci kodsuz, correlation_id'siz bir bağlantı resetlenmesi
+	// görüyordu. Fark gövde okuması için pay bırakıyor (F09).
+	batchTimeout = 20 * time.Second
 
 	// IdempotencyKeyHeader, istemcinin tekrar gönderim koruması için verdiği anahtar.
 	IdempotencyKeyHeader = "Idempotency-Key"

@@ -261,8 +261,20 @@ func (e *Engine) awaitPermit(
 			if !errSeen {
 				errSeen = true
 
-				log.ErrorContext(ctx, "gönderim izni alınamadı, gönderim yapılmıyor",
-					slog.String("error", err.Error()))
+				// Kapanış ayrı seviyede: dispatchAll'ın select'i iki dalı da hazır
+				// bulduğunda rastgele seçtiği için kapanış anında birkaç satır yine
+				// sender'a dağıtılıyor ve izin sorgusu İPTAL EDİLMİŞ ctx ile gidip
+				// context.Canceled dönüyor. Doğruluk sorunu yok (satır releaseLeases
+				// ile kuyruğa dönüyor, sağlayıcıya gidilmiyor) ama ERROR basmak her
+				// normal kapanışı gerçek bir Redis arızasıyla aynı göstererek
+				// operatörü yanlış yere bakmaya gönderiyordu (F19).
+				if ctx.Err() != nil {
+					log.DebugContext(ctx, "kapanış sırasında izin beklemesi kesildi",
+						slog.String("error", err.Error()))
+				} else {
+					log.ErrorContext(ctx, "gönderim izni alınamadı, gönderim yapılmıyor",
+						slog.String("error", err.Error()))
+				}
 			}
 
 			window = grow(max(window, rateWaitFloor), rateWaitCeil)

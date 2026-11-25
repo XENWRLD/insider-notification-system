@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"log/slog"
-	"time"
 )
 
 // runJanitor, süresi dolmuş idempotency anahtarlarını periyodik olarak siler.
@@ -17,20 +16,7 @@ import (
 // sayıyor ve yeni bir istek onu devralabiliyor (Adım 4). Buradaki iş yalnızca tabloyu
 // küçük tutmak.
 func (e *Engine) runJanitor(ctx context.Context) {
-	ticker := time.NewTicker(e.cfg.IdempotencyCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			e.logger.InfoContext(ctx, "janitor kapandı")
-
-			return
-
-		case <-ticker.C:
-			e.cleanOnce(ctx)
-		}
-	}
+	e.runPeriodic(ctx, e.cfg.IdempotencyCleanupInterval, "janitor", e.cleanOnce)
 }
 
 // cleanOnce, tek bir temizlik turu yapar.

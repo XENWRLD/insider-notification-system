@@ -24,6 +24,15 @@ const (
 	ChannelPush  Channel = "push"
 )
 
+// AllChannels, desteklenen kanalların tamamı.
+//
+// Tek kaynak: worker havuzlarının varsayılanı ve sağlayıcı bağlantı havuzunun boyutu
+// (kanal × concurrency) bu listeden türüyor. Yeni bir kanal eklenince ikisi birden
+// doğru kalır — ayrı ayrı yazıldığında biri güncellenmeden kalıyordu.
+func AllChannels() []Channel {
+	return []Channel{ChannelSMS, ChannelEmail, ChannelPush}
+}
+
 // Valid, kanalın desteklenen değerlerden biri olup olmadığını söyler.
 func (c Channel) Valid() bool {
 	switch c {

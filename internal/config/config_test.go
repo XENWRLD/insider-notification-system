@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -271,4 +272,44 @@ func TestLoadRejectsInvalidRateLimitValues(t *testing.T) {
 			require.Contains(t, err.Error(), test.key)
 		})
 	}
+}
+
+// TestLoadRejectsCountsAboveUpperBound, sayaç değişkenlerinin üst sınırını doğrular.
+//
+// Üst sınır olmadan yalnızca "pozitif olmalı" kontrolü vardı ve bu değerler aşağı
+// akışta int32'ye dönüşüyor: WORKER_DB_MAX_CONNS=4294967296 → int32(0) → havuz pgx
+// varsayılanına SESSİZCE düşerken açılış logu hâlâ 4294967296 yazıyordu; =4294967297
+// → int32(1) → bütün sender'lar tek bağlantı için yarışıyor ve gönderilmiş mesajların
+// sonucu yazılamıyordu (review bulgusu F14). Artık açılışta hata.
+func TestLoadRejectsCountsAboveUpperBound(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("WORKER_DB_MAX_CONNS", "4294967296")
+	t.Setenv("WORKER_CONCURRENCY", "4294967297")
+
+	_, err := Load()
+	require.Error(t, err)
+
+	// Tüm sorunlar tek yanıtta: paketin kendi felsefesi.
+	require.Contains(t, err.Error(), "WORKER_DB_MAX_CONNS")
+	require.Contains(t, err.Error(), "WORKER_CONCURRENCY")
+	require.Contains(t, err.Error(), "en fazla")
+}
+
+// TestLoadAcceptsCountsAtUpperBound, sınırın kendisinin geçerli olduğunu doğrular:
+// sınır saçma değerleri kesmek için var, makul değerleri daraltmak için değil.
+func TestLoadAcceptsCountsAtUpperBound(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("WORKER_REAPER_BATCH_SIZE", "1000000")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, MaxCountValue, cfg.WorkerReaperBatchSize)
+}
+
+// TestMaxCountValueFitsInt32, sınırın int32 dönüşümünü güvenli kıldığını doğrular.
+//
+// cmd/worker int32(cfg.WorkerDBMaxConns) dönüşümünü bu değişmeze dayanarak yapıyor
+// (pgxpool.MaxConns int32); sınır büyütülürse bu test uyarır.
+func TestMaxCountValueFitsInt32(t *testing.T) {
+	require.LessOrEqual(t, MaxCountValue, math.MaxInt32)
 }

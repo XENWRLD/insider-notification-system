@@ -469,6 +469,36 @@ duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
         `next_cursor` geri verilmelidir; elle kurulmamalı (iç yapı değişebilir)
   - [ ] README'de tarih aralığı: `[from, to)` yarı açık; `to` hariç olduğu için ardışık
         pencereler sınır kaydını iki kez saymaz. Saat dilimi zorunlu
+- [x] **Polish (review bulguları):** F06, F08, F09, F13, F14, F19, F42 → `fix: close review polish findings`
+  - [x] **F08 — kendi recoverer'ımız:** chi'nin hazır `Recoverer`'ı istemciye GÖVDESİZ
+        bir 500 dönüyor (hata zarfı ve `correlation_id` yok) ve yığını ANSI renkli,
+        çok satırlı olarak doğrudan stderr'e basıyordu — iki belgelenmiş değişmez
+        birden kırılıyordu. `http.ErrAbortHandler` yeniden paniklendiriliyor
+  - [x] **F13 — JSON hata metni çevriliyor:** `encoding/json`'un mesajı iç DTO
+        adlarını (`createNotificationRequest`, `[]httpapi....`) sızdırıyor ve onları
+        fiilî sözleşmeye çeviriyordu. Artık alan adı + JSON tipi:
+        `"channel" alanı için beklenen tip string, gelen number`
+  - [x] **F09 — `batchTimeout` 30s → 20s:** `WriteTimeout` ile eşit olmak kuralın tek
+        istisnasıydı ve yorumun engellediğini söylediği sonucu üretiyordu (write
+        deadline header'la başlıyor, 500 zarfı flush edilemiyor)
+  - [x] **F14 — sayaçlara üst sınır** (`config.MaxCountValue`, 1.000.000):
+        `WORKER_DB_MAX_CONNS=4294967296` → `int32(0)` → havuz sessizce pgx varsayılanına
+        düşerken log 4294967296 yazıyordu. Artık açılışta hata; `MaxCountValue`'nun
+        int32'ye sığdığı da testle sabit
+  - [x] **F06 — idle bağlantı havuzu `len(domain.AllChannels()) × concurrency`:** üç
+        kanal havuzu aynı `provider.Client`'ı paylaşıyor, uçan istek 3 × 20 = 60'tı;
+        idle 20 kalınca yanıtların 2/3'ü bağlantıyı kapatıyor ve alanın kaldırmak için
+        eklendiği el sıkışma maliyeti geri geliyordu. `domain.AllChannels()` tek kaynak
+  - [x] **F19 + F42 — kapanış gürültüsü:** kapanışta `select`'in rastgele dal seçimi
+        yüzünden izin sorgusu ve reaper/janitor sorguları ölü context'le gidiyor,
+        normal bir kapanış gerçek arızayla aynı ERROR'u basıyordu. Reaper ve janitor
+        döngüsü ortak `tickLoop`'a çıkarıldı (F21'in kopyası da kapandı) ve tick
+        kanalını dışarıdan aldığı için yarış **determinist** test edilebiliyor:
+        guard'sız 200 turun 93'ü ölü context'le çalışıyor, guard'la 0.
+        İzin hatası kapanışta DEBUG, gerçek arızada ERROR kalıyor
+  - [x] **Ölçüm (canlı):** 300'lük batch uçuşurken `docker compose stop worker` →
+        kapanış loglarında **0 ERROR**, yalnızca INFO; restart sonrası 303 `sent`,
+        takılı `processing` satırı 0
 - [ ] **Son prova:** sıfırdan klon + demo senaryosu
 - [ ] **Mülakat provası**
 - [ ] *(Zaman kalırsa)* **Tracing:** OpenTelemetry + Jaeger

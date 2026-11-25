@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -70,7 +69,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// olmadığımız sürece istemci IP'si taklit edilebiliyor (GHSA-3fxj-6jh8-hvhx).
 	router.Use(correlationIDMiddleware)
 	router.Use(requestLogger(deps.Logger))
-	router.Use(middleware.Recoverer)
+	router.Use(recoverer(deps.Logger))
 
 	// chi'nin varsayılan 404/405 handler'ları düz metin döner; API'nin geri kalanıyla
 	// aynı hata zarfını kullanmaları için değiştiriliyor.

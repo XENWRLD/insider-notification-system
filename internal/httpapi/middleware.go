@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"errors"
+	"runtime/debug"
+
 	"context"
 	"log/slog"
 	"net/http"
@@ -79,6 +82,50 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.Int64("duration_ms", time.Since(started).Milliseconds()),
 				slog.String("remote_addr", r.RemoteAddr),
 			)
+		})
+	}
+}
+
+// recoverer, handler paniğini yakalar: hata zarfını yazar ve yığını slog'a basar.
+//
+// chi'nin hazır Recoverer'ı yerine kendi sürümü kullanılıyor. O, chi'nin kendi
+// logger'ı kurulu olmadığında (bu projede bilinçli olarak kurulu değil) yığını ANSI
+// renkli ve çok satırlı olarak doğrudan os.Stderr'e basıyor — JSON log hattına
+// ayrıştırılamaz bir blob düşüyor — ve istemciye GÖVDESİZ bir 500 dönüyordu:
+// error kodu yok, mesaj yok, gövdede correlation_id yok. İkisi de projenin iki
+// belgelenmiş değişmezini kırıyordu (hata zarfı TÜM uçlarda, log yalnızca slog/JSON).
+func recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				recovered := recover()
+				if recovered == nil {
+					return
+				}
+
+				// http.ErrAbortHandler bilinçli bir iptal sözleşmesi (örn. proxy
+				// bağlantıyı kesti): net/http'nin kendisi bunu sessizce işliyor ve
+				// yeniden panikletmek doğru davranış.
+				// (Tip kontrollü: panik değeri her zaman error olmak zorunda değil.)
+				if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					panic(recovered)
+				}
+
+				logger.ErrorContext(r.Context(), "handler panikledi",
+					slog.String("correlation_id", CorrelationID(r.Context())),
+					slog.String("method", r.Method),
+					slog.String("path", r.URL.Path),
+					slog.Any("panic", recovered),
+					// Yığın tek bir string alanı olarak: çok satırlı da olsa JSON
+					// kaçışıyla tek log kaydı kalıyor ve log toplayıcı onu bölmüyor.
+					slog.String("stack", string(debug.Stack())),
+				)
+
+				writeError(w, r, http.StatusInternalServerError, CodeInternalError,
+					"istek işlenemedi")
+			}()
+
+			next.ServeHTTP(w, r)
 		})
 	}
 }

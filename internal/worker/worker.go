@@ -302,7 +302,7 @@ func New(
 	logger *slog.Logger,
 ) (*Engine, error) {
 	if len(cfg.Channels) == 0 {
-		cfg.Channels = []domain.Channel{domain.ChannelSMS, domain.ChannelEmail, domain.ChannelPush}
+		cfg.Channels = domain.AllChannels()
 	}
 
 	if err := cfg.validate(); err != nil {

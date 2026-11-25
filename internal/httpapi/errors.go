@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 )
@@ -181,9 +182,12 @@ func decodeJSON(
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(target); err != nil {
-		// Çözümleme hatasının metni istemciye verilir: hangi alanın bozuk olduğunu
-		// söylüyor ve hassas bilgi içermiyor.
-		writeError(w, r, http.StatusBadRequest, CodeInvalidJSON, err.Error())
+		// Hata METNİ olduğu gibi VERİLMEZ, çevrilir: encoding/json'un mesajı iç DTO
+		// tiplerini içeriyor ("...Go struct field createNotificationRequest.channel of
+		// type string", batch'te "[]httpapi.createNotificationRequest"). Bu hem paket
+		// içi isimleri sızdırıyor hem de o isimleri fiilî API sözleşmesine çeviriyordu:
+		// bir struct yeniden adlandırıldığında mesaja bakan istemci kırılırdı.
+		writeError(w, r, http.StatusBadRequest, CodeInvalidJSON, decodeErrorMessage(err))
 
 		return nil, false
 	}
@@ -226,4 +230,65 @@ func hasJSONContentType(r *http.Request) bool {
 	mediaType, _, err := mime.ParseMediaType(header)
 
 	return err == nil && mediaType == "application/json"
+}
+
+// decodeErrorMessage, JSON çözümleme hatasını istemciye verilebilir bir mesaja çevirir.
+//
+// Amaç ikisi birden: istemci hangi alanın bozuk olduğunu öğrensin (bu bilgi gerçekten
+// yararlı) ama Go tip adları dışarı çıkmasın. Alan adı JSON etiketinden geldiği için
+// istemcinin gönderdiği şeyin aynısı; iç adlandırma değil.
+func decodeErrorMessage(err error) string {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		if typeErr.Field != "" {
+			return fmt.Sprintf("%q alanı için beklenen tip %s, gelen %s",
+				typeErr.Field, jsonTypeName(typeErr.Type.String()), typeErr.Value)
+		}
+
+		return fmt.Sprintf("gövdede beklenmeyen bir değer var: %s", typeErr.Value)
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fmt.Sprintf("gövde geçerli JSON değil (%d. bayt civarında)", syntaxErr.Offset)
+	}
+
+	// Bilinmeyen alan hatası tipli değil, yalnızca metin olarak geliyor
+	// (`json: unknown field "prioritiy"`). Alan adı istemcinin kendi gönderdiği şey,
+	// yani sızdırdığı bir iç isim yok; yalnızca önek Türkçeleştiriliyor.
+	const unknownField = "json: unknown field "
+	if field, found := strings.CutPrefix(err.Error(), unknownField); found {
+		return "bilinmeyen alan: " + field
+	}
+
+	if errors.Is(err, io.EOF) {
+		return "istek gövdesi boş"
+	}
+
+	// Geri kalanı (beklenmeyen EOF, çok derin iç içe yapı) tek bir genel mesaja
+	// düşüyor: metni aktarmak yeni bir sızma yolu açardı.
+	return "gövde çözümlenemedi"
+}
+
+// jsonTypeName, Go tip adını JSON tip adına çevirir.
+//
+// Tam bir eşleme değil, sözleşmede geçen tipler kadarı: gövdedeki alanların tamamı
+// string, sayı, dizi veya nesne. Tanınmayan bir tipte "değer" deniyor — Go adını
+// yazmak, düzeltilen sorunu geri getirirdi.
+func jsonTypeName(goType string) string {
+	switch {
+	case goType == "string":
+		return "string"
+	case strings.HasPrefix(goType, "int") || strings.HasPrefix(goType, "uint") ||
+		strings.HasPrefix(goType, "float"):
+		return "sayı"
+	case goType == "bool":
+		return "boolean"
+	case strings.HasPrefix(goType, "[]"):
+		return "dizi"
+	case strings.HasPrefix(goType, "map") || strings.HasPrefix(goType, "struct"):
+		return "nesne"
+	default:
+		return "değer"
+	}
 }
