@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/XENWRLD/insider-notification-system/internal/breaker"
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
 	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
@@ -91,9 +92,19 @@ type Config struct {
 	// DrainTimeout, kapanışta uçan gönderimlerin bitmesi için beklenen süre.
 	DrainTimeout time.Duration
 
-	// FixedRetryDelay, Adım 6'nın geçici retry gecikmesi. Adım 8'de exponential
-	// backoff + jitter bunun yerini alacak.
-	FixedRetryDelay time.Duration
+	// RetryBaseDelay/RetryMaxDelay, exponential backoff penceresinin sınırları:
+	// gecikme = jitter(min(base × 2^(deneme-1), max)).
+	RetryBaseDelay time.Duration
+	RetryMaxDelay  time.Duration
+
+	// BreakerFailureThreshold, devrenin açılması için gereken ARDIŞIK hata sayısı.
+	BreakerFailureThreshold int
+
+	// BreakerOpenTimeout, açık devrenin yarı açığa geçmesi için beklenen süre.
+	//
+	// Devre devraldığında satırlar bunun İKİ KATI kadar ertelenir (bkz.
+	// retryPolicy.RequeueDelay).
+	BreakerOpenTimeout time.Duration
 
 	// RateWaitMax, hız sınırından izin beklemenin üst sınırı.
 	//
@@ -150,7 +161,9 @@ func (c Config) validate() error {
 		{"ProviderTimeout", c.ProviderTimeout},
 		{"ResultTimeout", c.ResultTimeout},
 		{"DrainTimeout", c.DrainTimeout},
-		{"FixedRetryDelay", c.FixedRetryDelay},
+		{"RetryBaseDelay", c.RetryBaseDelay},
+		{"RetryMaxDelay", c.RetryMaxDelay},
+		{"BreakerOpenTimeout", c.BreakerOpenTimeout},
 		{"RateWaitMax", c.RateWaitMax},
 		{"ReaperInterval", c.ReaperInterval},
 		{"IdempotencyTTL", c.IdempotencyTTL},
@@ -168,11 +181,18 @@ func (c Config) validate() error {
 		{"Concurrency", c.Concurrency},
 		{"ClaimBatchSize", c.ClaimBatchSize},
 		{"ReaperBatchSize", c.ReaperBatchSize},
+		{"BreakerFailureThreshold", c.BreakerFailureThreshold},
 		{"IdempotencyCleanupBatch", c.IdempotencyCleanupBatch},
 	} {
 		if positive.value <= 0 {
 			problems = append(problems, positive.name+" pozitif olmalı")
 		}
+	}
+
+	if c.RetryMaxDelay > 0 && c.RetryBaseDelay > c.RetryMaxDelay {
+		problems = append(problems, fmt.Sprintf(
+			"RetryBaseDelay (%s) RetryMaxDelay'den (%s) büyük olamaz",
+			c.RetryBaseDelay, c.RetryMaxDelay))
 	}
 
 	if c.PollMinInterval > c.PollMaxInterval {
@@ -236,15 +256,29 @@ type Engine struct {
 	queue   Queue
 	sender  Sender
 	limiter ratelimit.Limiter
-	logger  *slog.Logger
+
+	// breakers, kanal başına devre kesici. New içinde bir kez kurulup bir daha
+	// YAZILMIYOR; bu yüzden eşzamanlı okuma güvenli ve mutex gerekmiyor.
+	breakers map[domain.Channel]breaker.Breaker
+
+	logger *slog.Logger
 }
 
 // New, ayarları doğrulayıp motoru kurar.
 //
 // Doğrulama boot'ta yapılıyor: yanlış ayarla çalışan bir worker saatler sonra
 // "neden mesajlar iki kez gidiyor" sorusuna dönüşürdü.
+// newBreaker bir FABRİKA olarak alınıyor: üretimde breaker.New geçilir, testte
+// açık/yarı açık durumları determinist kuran bir stub. Hazır bir map geçirmek testte
+// kanal eklemeyi zorlaştırırdı. nil geçilirse devre kesici uygulanmaz
+// (breaker.AlwaysClosed) — Adım 6/7 testleri bunu kullanıyor.
 func New(
-	cfg Config, queue Queue, sender Sender, limiter ratelimit.Limiter, logger *slog.Logger,
+	cfg Config,
+	queue Queue,
+	sender Sender,
+	limiter ratelimit.Limiter,
+	newBreaker func(domain.Channel) (breaker.Breaker, error),
+	logger *slog.Logger,
 ) (*Engine, error) {
 	if len(cfg.Channels) == 0 {
 		cfg.Channels = []domain.Channel{domain.ChannelSMS, domain.ChannelEmail, domain.ChannelPush}
@@ -264,9 +298,59 @@ func New(
 		return nil, errors.New("worker hız sınırlayıcı olmadan çalışamaz")
 	}
 
+	breakers := make(map[domain.Channel]breaker.Breaker, len(cfg.Channels))
+
+	for _, channel := range cfg.Channels {
+		if newBreaker == nil {
+			breakers[channel] = breaker.AlwaysClosed()
+
+			continue
+		}
+
+		brk, err := newBreaker(channel)
+		if err != nil {
+			return nil, fmt.Errorf("%s kanalı için devre kesici kurulamadı: %w", channel, err)
+		}
+
+		if brk == nil {
+			return nil, fmt.Errorf("%s kanalı için devre kesici nil döndü", channel)
+		}
+
+		breakers[channel] = brk
+	}
+
 	return &Engine{
-		cfg: cfg, queue: queue, sender: sender, limiter: limiter, logger: logger,
+		cfg: cfg, queue: queue, sender: sender, limiter: limiter,
+		breakers: breakers, logger: logger,
 	}, nil
+}
+
+// breakerFor, kanalın devre kesicisini verir.
+//
+// Map New içinde cfg.Channels'tan kurulduğu için üretimde her kanal bulunur; eksik
+// bir anahtar bir programlama hatasıdır ve nil Breaker panik üretirdi. Güvenli taraf
+// "devre kesici yok" demek: gönderim durmaz, yalnızca koruma uygulanmaz.
+func (e *Engine) breakerFor(channel domain.Channel) breaker.Breaker {
+	if brk, ok := e.breakers[channel]; ok {
+		return brk
+	}
+
+	e.logger.Error("kanal için devre kesici bulunamadı, korumasız devam ediliyor",
+		slog.String("channel", string(channel)))
+
+	return breaker.AlwaysClosed()
+}
+
+// retryPolicy, gecikme ayarlarını classify'ın beklediği biçime çevirir.
+func (e *Engine) retryPolicy() retryPolicy {
+	return retryPolicy{
+		BaseDelay: e.cfg.RetryBaseDelay,
+		MaxDelay:  e.cfg.RetryMaxDelay,
+
+		// İki kat: tek kat, satırın bir sonraki yarı açık pencerede yine sondaya
+		// çıkmasını engellemiyor (gerekçe retryPolicy.RequeueDelay yorumunda).
+		RequeueDelay: 2 * e.cfg.BreakerOpenTimeout,
+	}
 }
 
 // Run, motoru çalıştırır ve context iptal edilene kadar bloklar.

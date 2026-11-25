@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/XENWRLD/insider-notification-system/internal/breaker"
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
 	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
@@ -37,8 +38,12 @@ func testConfig() Config {
 		ProviderTimeout: time.Second,
 		ResultTimeout:   time.Second,
 		DrainTimeout:    5 * time.Second,
-		FixedRetryDelay: 5 * time.Second,
 		RateWaitMax:     300 * time.Millisecond,
+
+		RetryBaseDelay:          5 * time.Millisecond,
+		RetryMaxDelay:           50 * time.Millisecond,
+		BreakerFailureThreshold: 5,
+		BreakerOpenTimeout:      20 * time.Millisecond,
 
 		ReaperInterval:  time.Millisecond,
 		ReaperBatchSize: 100,
@@ -217,6 +222,14 @@ func (q *stubQueue) DeferLeases(
 	q.outstanding.Add(-int64(len(holds)))
 
 	return int64(len(holds)), nil
+}
+
+// deferredHolds, DeferLeases çağrılarının kopyasını döner.
+func (q *stubQueue) deferredHolds() []deferredHold {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return append([]deferredHold(nil), q.deferred...)
 }
 
 func (q *stubQueue) ReclaimExpiredLeases(
@@ -404,7 +417,24 @@ func newTestEngineWithLimiter(
 ) *Engine {
 	t.Helper()
 
-	engine, err := New(cfg, queue, sender, limiter, discardLogger())
+	// Devre kesici fabrikası nil: breaker.AlwaysClosed() kurulur, yani devre kesici
+	// dışındaki davranışı ölçen testler durum makinesi kurmak zorunda kalmıyor.
+	return newTestEngineWithBreaker(t, cfg, queue, sender, limiter, nil)
+}
+
+// newTestEngineWithBreaker, verilen fabrikayla motor kurar: devre kesici testleri
+// açık/yarı açık durumları determinist biçimde kuruyor.
+func newTestEngineWithBreaker(
+	t *testing.T,
+	cfg Config,
+	queue Queue,
+	sender Sender,
+	limiter ratelimit.Limiter,
+	newBreaker func(domain.Channel) (breaker.Breaker, error),
+) *Engine {
+	t.Helper()
+
+	engine, err := New(cfg, queue, sender, limiter, newBreaker, discardLogger())
 	if err != nil {
 		t.Fatalf("motor kurulamadı: %v", err)
 	}

@@ -18,7 +18,9 @@ import (
 	"syscall"
 
 	"github.com/XENWRLD/insider-notification-system/internal/bootstrap"
+	"github.com/XENWRLD/insider-notification-system/internal/breaker"
 	"github.com/XENWRLD/insider-notification-system/internal/config"
+	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/observability"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
 	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
@@ -90,6 +92,42 @@ func run() error {
 		return err
 	}
 
+	// Devre kesici fabrikası: kanal başına bir durum makinesi. Devre YEREL (process
+	// içi) — rate limiter'ın aksine paylaşılmıyor. Sayaç değişmeli (commutative) bir
+	// değer olduğu için tek bir Redis anahtarında paylaşılabiliyor, ama "ardışık 5
+	// hata" ifadesi kopyalar arası bir olay SIRALAMASI gerektiriyor ve bunu paylaşmak
+	// dağıtık uzlaşı problemi. Karşılığında kazanç küçük: fazla korumak zararsız, az
+	// korumak ise eşik × kopya ile sınırlı (3 kopyada ~12 mesaj birer deneme kaybeder).
+	newBreaker := func(channel domain.Channel) (breaker.Breaker, error) {
+		return breaker.New(breaker.Config{
+			Name:             string(channel),
+			FailureThreshold: cfg.WorkerBreakerFailureThreshold,
+			OpenTimeout:      cfg.WorkerBreakerOpenTimeout,
+
+			// Hangi hatanın devreyi ilgilendirdiği worker paketinin bilgisi:
+			// 429 sayılmaz (excluded), 400/422 sağlığın kanıtı, 5xx/auth/bağlantı hata.
+			IsFailure: worker.BreakerIsFailure,
+
+			// Durum geçişi başına TEK log satırı: her yoklamada loglamak, boş kuyrukta
+			// saniyede onlarca satır üretirdi.
+			OnStateChange: func(name string, from, to breaker.State) {
+				attrs := []any{
+					slog.String("channel", name),
+					slog.String("from", string(from)),
+					slog.String("to", string(to)),
+				}
+
+				if to == breaker.StateClosed {
+					logger.Info("devre kesici kapandı, kanal normale döndü", attrs...)
+
+					return
+				}
+
+				logger.Warn("devre kesici durumu değişti", attrs...)
+			},
+		})
+	}
+
 	engine, err := worker.New(worker.Config{
 		Concurrency:     cfg.WorkerConcurrency,
 		ClaimBatchSize:  cfg.WorkerClaimBatchSize,
@@ -99,15 +137,19 @@ func run() error {
 		ProviderTimeout: cfg.WorkerProviderTimeout,
 		ResultTimeout:   cfg.WorkerResultTimeout,
 		DrainTimeout:    cfg.WorkerDrainTimeout,
-		FixedRetryDelay: cfg.WorkerRetryDelay,
 		RateWaitMax:     cfg.WorkerRateWaitMax,
 		ReaperInterval:  cfg.WorkerReaperInterval,
 		ReaperBatchSize: cfg.WorkerReaperBatchSize,
 
+		RetryBaseDelay:          cfg.WorkerRetryBaseDelay,
+		RetryMaxDelay:           cfg.WorkerRetryMaxDelay,
+		BreakerFailureThreshold: cfg.WorkerBreakerFailureThreshold,
+		BreakerOpenTimeout:      cfg.WorkerBreakerOpenTimeout,
+
 		IdempotencyTTL:             cfg.IdempotencyTTL,
 		IdempotencyCleanupInterval: cfg.IdempotencyCleanupInterval,
 		IdempotencyCleanupBatch:    cfg.IdempotencyCleanupBatch,
-	}, store.New(pool), providerClient, limiter, logger)
+	}, store.New(pool), providerClient, limiter, newBreaker, logger)
 	if err != nil {
 		return err
 	}
@@ -118,6 +160,8 @@ func run() error {
 		slog.Int("db_max_conns", cfg.WorkerDBMaxConns),
 		slog.Int("rate_limit_per_second", cfg.RateLimitPerSecond),
 		slog.Int("rate_limit_burst", cfg.RateLimitBurst),
+		slog.Int("breaker_failure_threshold", cfg.WorkerBreakerFailureThreshold),
+		slog.String("breaker_open_timeout", cfg.WorkerBreakerOpenTimeout.String()),
 	)
 
 	return engine.Run(ctx)

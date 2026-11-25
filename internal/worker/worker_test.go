@@ -41,7 +41,7 @@ func TestNewRejectsLeaseShorterThanLeaseWindow(t *testing.T) {
 	cfg.ResultTimeout = 3 * time.Second
 	cfg.LeaseDuration = 40 * time.Second // gereken: 2 × 23s = 46s
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "LeaseDuration")
@@ -62,14 +62,14 @@ func TestNewAcceptsLeaseAtExactLeaseWindowBoundary(t *testing.T) {
 	cfg.LeaseDuration = 46 * time.Second
 	cfg.DrainTimeout = 13 * time.Second
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 	require.NoError(t, err)
 
 	// Üretim varsayılanları: lease 60s, pencere 2 × 23s = 46s.
 	cfg.LeaseDuration = 60 * time.Second
 	cfg.DrainTimeout = 20 * time.Second
 
-	_, err = New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err = New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 	require.NoError(t, err, "üretim varsayılanları eşitsizliği sağlamalı")
 }
 
@@ -80,7 +80,7 @@ func TestNewAcceptsLeaseAtExactLeaseWindowBoundary(t *testing.T) {
 func TestNewRejectsMissingLimiter(t *testing.T) {
 	t.Parallel()
 
-	_, err := New(testConfig(), &stubQueue{}, &stubSender{}, nil, discardLogger())
+	_, err := New(testConfig(), &stubQueue{}, &stubSender{}, nil, nil, discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "hız sınırlayıcı")
@@ -94,7 +94,7 @@ func TestNewRejectsNonPositiveRateWaitMax(t *testing.T) {
 	cfg := testConfig()
 	cfg.RateWaitMax = 0
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "RateWaitMax")
@@ -115,7 +115,7 @@ func TestNewRejectsDrainTimeoutShorterThanSendWindow(t *testing.T) {
 	cfg.LeaseDuration = time.Minute
 	cfg.DrainTimeout = 5 * time.Second // gereken: 13s
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "DrainTimeout")
@@ -171,7 +171,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 			cfg := testConfig()
 			test.mutate(&cfg)
 
-			_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+			_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 
 			require.Error(t, err)
 			require.Contains(t, err.Error(), test.wantStr)
@@ -189,7 +189,7 @@ func TestNewCollectsAllProblems(t *testing.T) {
 	cfg.ClaimBatchSize = 0
 	cfg.ReaperBatchSize = 0
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Concurrency")
@@ -202,10 +202,10 @@ func TestNewCollectsAllProblems(t *testing.T) {
 func TestNewRejectsMissingDependencies(t *testing.T) {
 	t.Parallel()
 
-	_, err := New(testConfig(), nil, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err := New(testConfig(), nil, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 	require.Error(t, err)
 
-	_, err = New(testConfig(), &stubQueue{}, nil, ratelimit.Unlimited(), discardLogger())
+	_, err = New(testConfig(), &stubQueue{}, nil, ratelimit.Unlimited(), nil, discardLogger())
 	require.Error(t, err)
 }
 
@@ -350,6 +350,6 @@ func TestDrainWindowExcludesRateWait(t *testing.T) {
 	cfg.LeaseDuration = time.Minute
 	cfg.DrainTimeout = 13 * time.Second
 
-	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), discardLogger())
+	_, err := New(cfg, &stubQueue{}, &stubSender{}, ratelimit.Unlimited(), nil, discardLogger())
 	require.NoError(t, err)
 }

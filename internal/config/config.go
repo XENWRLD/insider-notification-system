@@ -63,8 +63,18 @@ type Config struct {
 	WorkerResultTimeout time.Duration
 	// WorkerDrainTimeout, kapanışta uçan gönderimler için beklenen süre.
 	WorkerDrainTimeout time.Duration
-	// WorkerRetryDelay, Adım 6'nın geçici sabit retry gecikmesi.
-	WorkerRetryDelay time.Duration
+	// WorkerRetryBaseDelay/WorkerRetryMaxDelay, exponential backoff penceresinin
+	// sınırları: gecikme = jitter(min(base × 2^(deneme-1), max)).
+	WorkerRetryBaseDelay time.Duration
+	WorkerRetryMaxDelay  time.Duration
+
+	// WorkerBreakerFailureThreshold, devre kesicinin açılması için gereken ARDIŞIK
+	// hata sayısı (kanal başına).
+	WorkerBreakerFailureThreshold int
+
+	// WorkerBreakerOpenTimeout, açık devrenin yarı açığa geçmesi için beklenen süre.
+	// Devre devraldığında satırlar bunun iki katı kadar ertelenir.
+	WorkerBreakerOpenTimeout time.Duration
 	// WorkerReaperInterval/BatchSize, lease kurtarma döngüsü.
 	WorkerReaperInterval  time.Duration
 	WorkerReaperBatchSize int
@@ -157,7 +167,9 @@ func Load() (Config, error) {
 		{"WORKER_PROVIDER_TIMEOUT", &cfg.WorkerProviderTimeout, 10 * time.Second},
 		{"WORKER_RESULT_TIMEOUT", &cfg.WorkerResultTimeout, 3 * time.Second},
 		{"WORKER_DRAIN_TIMEOUT", &cfg.WorkerDrainTimeout, 20 * time.Second},
-		{"WORKER_RETRY_DELAY", &cfg.WorkerRetryDelay, 5 * time.Second},
+		{"WORKER_RETRY_BASE_DELAY", &cfg.WorkerRetryBaseDelay, 2 * time.Second},
+		{"WORKER_RETRY_MAX_DELAY", &cfg.WorkerRetryMaxDelay, 5 * time.Minute},
+		{"WORKER_BREAKER_OPEN_TIMEOUT", &cfg.WorkerBreakerOpenTimeout, 30 * time.Second},
 		{"WORKER_REAPER_INTERVAL", &cfg.WorkerReaperInterval, 10 * time.Second},
 		{"WORKER_RATE_WAIT_MAX", &cfg.WorkerRateWaitMax, 10 * time.Second},
 		{"IDEMPOTENCY_CLEANUP_INTERVAL", &cfg.IdempotencyCleanupInterval, time.Hour},
@@ -178,6 +190,7 @@ func Load() (Config, error) {
 		{"WORKER_CONCURRENCY", &cfg.WorkerConcurrency, 20},
 		{"WORKER_CLAIM_BATCH_SIZE", &cfg.WorkerClaimBatchSize, 20},
 		{"WORKER_REAPER_BATCH_SIZE", &cfg.WorkerReaperBatchSize, 100},
+		{"WORKER_BREAKER_FAILURE_THRESHOLD", &cfg.WorkerBreakerFailureThreshold, 5},
 		{"WORKER_DB_MAX_CONNS", &cfg.WorkerDBMaxConns, 16},
 		{"RATE_LIMIT_PER_SECOND", &cfg.RateLimitPerSecond, 100},
 		{"RATE_LIMIT_BURST", &cfg.RateLimitBurst, 5},

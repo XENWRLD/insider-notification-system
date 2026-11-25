@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/XENWRLD/insider-notification-system/internal/breaker"
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/provider"
 	"github.com/XENWRLD/insider-notification-system/internal/ratelimit"
@@ -63,6 +64,24 @@ func (e *Engine) handle(ctx context.Context, notification *domain.Notification) 
 		return
 	}
 
+	brk := e.breakerFor(notification.Channel)
+	policy := e.retryPolicy()
+
+	// ERKEN KAPI. Devre açıkken satır, rate limit izni HARCAMADAN kuyruğa dönüyor —
+	// asıl kural bu: paylaşılan Redis bütçesi, sağlayıcıya hiç gitmeyecek gönderimler
+	// için yanmamalı. Deneme de sayılmıyor.
+	//
+	// StateHalfOpen bu kapıdan GEÇER: sonda buradan geçmek zorunda, yoksa devre hiç
+	// kapanamazdı.
+	if brk.State() == breaker.StateOpen {
+		log.WarnContext(ctx, "devre kesici açık, gönderim yapılmadı",
+			slog.String("requeue_delay", policy.RequeueDelay.String()))
+		e.deferLeases(ctx, log, []*domain.Notification{notification},
+			policy.RequeueDelay, breaker.ErrOpen.Error())
+
+		return
+	}
+
 	// Hız sınırı: izin alınmadan sağlayıcıya gidilmez. İzin alınamazsa satır
 	// kuyruğa geri verilir — gönderim HİÇ yapılmaz.
 	if !e.awaitPermit(ctx, log, notification) {
@@ -71,13 +90,118 @@ func (e *Engine) handle(ctx context.Context, notification *domain.Notification) 
 		return
 	}
 
-	resp, elapsed, sendErr := e.send(ctx, notification)
+	var (
+		resp    provider.SendResponse
+		elapsed time.Duration
+		sendErr error
+	)
 
-	result := classify(notification, resp, sendErr, e.cfg.FixedRetryDelay, elapsed)
+	// İKİNCİ KAPI. Closure sonucu DIŞARIYA taşıyor (resp/elapsed/sendErr) ve devreye
+	// yalnızca "kanal sağlıklı mı" bilgisini veriyor:
+	//   breakerHealthy olan HER sonuçta nil → 2xx, DecodeError ve 400/422.
+	//   DecodeError'da nil dönmek ŞART: gerçek hatayı döndürseydik IsFailure onu false
+	//   sayıp "excluded" yapardı, yani mesaj gönderilmiş olmasına rağmen yarı açık sonda
+	//   devreyi KAPATMAZDI — gövdesi JSON olmayan bir sağlayıcıda devre süresiz yarı
+	//   açık kalırdı.
+	brkErr := brk.Do(func() error {
+		resp, elapsed, sendErr = e.send(ctx, notification)
 
-	logOutcome(ctx, log, result, sendErr, elapsed)
+		if breakerOutcomeFor(sendErr) == breakerHealthy {
+			return nil
+		}
 
-	e.writeResult(ctx, log, result)
+		return sendErr
+	})
+
+	// Yarış: izin beklerken devre açılmış ya da yarı açık sonda kotası dolmuş.
+	// İzin yandı ama satır kaybolmadı.
+	if errors.Is(brkErr, breaker.ErrOpen) {
+		log.WarnContext(ctx, "devre kesici izin beklerken devraldı, gönderim yapılmadı",
+			slog.String("requeue_delay", policy.RequeueDelay.String()))
+		e.deferLeases(ctx, log, []*domain.Notification{notification},
+			policy.RequeueDelay, breaker.ErrOpen.Error())
+
+		return
+	}
+
+	// Durum çağrıdan SONRA okunuyor: devre kapalı kaldıysa 500 alan mesaj sıradan bir
+	// geçici hata gibi sayılmalı (zehirli mesaj açığı, bkz. classify).
+	outcome := classify(notification, resp, sendErr, policy, elapsed, brk.State())
+
+	logOutcome(ctx, log, outcome, sendErr, elapsed)
+
+	switch outcome.action {
+	case actionWriteResult:
+		e.writeResult(ctx, log, outcome.result)
+
+	case actionRequeue:
+		e.deferLeases(ctx, log, []*domain.Notification{notification},
+			outcome.requeueDelay, outcome.requeueReason)
+	}
+}
+
+// deferLeases, denemeyi saymadan satırları kuyruğa geri verir.
+//
+// releaseLeases'in kardeşi; farkı sebebi yazması ve erteleme uygulaması. Aynı taze
+// context gerekçesi geçerli: çağıranın context'i kapanışta iptal edilmiş olabilir ve
+// onun çocuğu anında ölerek geri vermeyi hiç çalıştırmazdı.
+func (e *Engine) deferLeases(
+	ctx context.Context,
+	log *slog.Logger,
+	pending []*domain.Notification,
+	delay time.Duration,
+	reason string,
+) {
+	holds := leaseHolds(ctx, log, pending)
+	if len(holds) == 0 {
+		return
+	}
+
+	deferCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), e.cfg.ResultTimeout)
+	defer cancel()
+
+	deferred, err := e.queue.DeferLeases(deferCtx, holds, delay, reason)
+	if err != nil {
+		// ReleaseLeases'in hata dalıyla aynı bedel: satır artırılmış attempt_count ile
+		// processing'de kalıyor ve reaper onu deneme sayarak geri koyuyor (gerekçe
+		// releaseLeases'te yazılı). Erteleme de uygulanmıyor.
+		log.ErrorContext(ctx,
+			"lease'ler ertelenemedi: reaper devralacak ve bu deneme SAYILACAK",
+			slog.Int("pending", len(holds)),
+			slog.String("error", err.Error()))
+
+		return
+	}
+
+	log.InfoContext(ctx, "işler denenmeden kuyruğa geri verildi",
+		slog.Int64("deferred", deferred),
+		slog.String("delay", delay.String()),
+		slog.String("reason", reason))
+}
+
+// leaseHolds, bildirimleri lease çiftlerine çevirir ve token'sız olanları atlar.
+func leaseHolds(
+	ctx context.Context, log *slog.Logger, pending []*domain.Notification,
+) []store.LeaseHold {
+	holds := make([]store.LeaseHold, 0, len(pending))
+
+	for _, notification := range pending {
+		if notification.LeaseToken == nil {
+			// Claim her satıra token yazar; buraya düşmek bir değişmez ihlali olurdu.
+			log.ErrorContext(ctx, "lease token'ı olmayan iş geri verilemedi",
+				slog.String("notification_id", notification.ID.String()))
+
+			continue
+		}
+
+		holds = append(holds, store.LeaseHold{
+			ID:    notification.ID,
+			Token: *notification.LeaseToken,
+		})
+	}
+
+	return holds
 }
 
 // awaitPermit, kanalın hız sınırından bir gönderim izni bekler.
@@ -237,23 +361,7 @@ func (e *Engine) send(
 func (e *Engine) releaseLeases(
 	ctx context.Context, log *slog.Logger, pending []*domain.Notification,
 ) {
-	holds := make([]store.LeaseHold, 0, len(pending))
-
-	for _, notification := range pending {
-		if notification.LeaseToken == nil {
-			// Claim her satıra token yazar; buraya düşmek bir değişmez ihlali olurdu.
-			log.ErrorContext(ctx, "lease token'ı olmayan iş geri verilemedi",
-				slog.String("notification_id", notification.ID.String()))
-
-			continue
-		}
-
-		holds = append(holds, store.LeaseHold{
-			ID:    notification.ID,
-			Token: *notification.LeaseToken,
-		})
-	}
-
+	holds := leaseHolds(ctx, log, pending)
 	if len(holds) == 0 {
 		return
 	}
@@ -325,16 +433,29 @@ func (e *Engine) writeResult(
 func logOutcome(
 	ctx context.Context,
 	log *slog.Logger,
-	result store.NotificationResult,
+	outcome decision,
 	sendErr error,
 	elapsed time.Duration,
 ) {
+	result := outcome.result
+
 	attrs := []any{
 		slog.Int64("duration_ms", int64(durationMS(elapsed))),
 	}
 
 	if result.StatusCode != nil {
 		attrs = append(attrs, slog.Int("status_code", *result.StatusCode))
+	}
+
+	// Denemenin SAYILMADIĞI yollar: deneme kaydı yazılmadığı için tutanak yalnızca bu
+	// log satırı ve satıra yazılan last_error. Bu yüzden Warn seviyesinde ve sebebiyle.
+	if outcome.action == actionRequeue {
+		log.WarnContext(ctx, "gönderim yapılmadı, iş denenmeden kuyruğa dönüyor",
+			append(attrs,
+				slog.String("requeue_delay", outcome.requeueDelay.String()),
+				slog.String("reason", outcome.requeueReason))...)
+
+		return
 	}
 
 	var decodeErr *provider.DecodeError

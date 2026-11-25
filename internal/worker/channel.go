@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XENWRLD/insider-notification-system/internal/breaker"
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 )
 
@@ -122,12 +123,66 @@ func (p *channelPool) claimLoop(ctx context.Context) {
 			return
 		}
 
+		// CLAIMER KAPISI — devre kesicinin ASIL kuralı.
+		//
+		// Devre açıkken o kanaldan iş ÇEKİLMİYOR: satırlar pending/retrying olarak
+		// kuyrukta kalıyor, yani ne deneme hakkı ne rate limit izni harcanıyor ve
+		// POST /cancel çalışmaya devam ediyor (satır processing'e geçmediği için).
+		// Bunu sender'daki kapıyla öğrenmek, işin çekilmiş olmasını gerektirirdi.
+		limit := tokens
+
+		switch p.engine.breakerFor(p.channel).State() {
+		case breaker.StateOpen:
+			// Jetonlar BEKLEMEDEN ÖNCE geri veriliyor (Adım 6 kuralı).
+			p.releaseTokens(tokens)
+
+			if !poll.wait(ctx) {
+				return
+			}
+
+			continue
+
+		case breaker.StateHalfOpen:
+			// Yarı açıkta TEK sonda var. Uçuşta iş varsa HİÇ claim etmiyoruz.
+			//
+			// Neden: başarılı bir claim'den sonra bu döngü poll.reset() + continue ile
+			// BEKLEMEDEN dönüyor. Sonda uçuştayken her turda bir satır daha çekilse,
+			// sender erken kapıyı geçer (durum Open değil, HalfOpen), izin alır ve
+			// brk.Do'da ErrTooManyRequests → ErrOpen yer. Tur milisaniyeler sürdüğü
+			// için saniyede yüzlerce kez: PAYLAŞILAN Redis bütçesinin tamamı (diğer
+			// kopyaların gönderimleri dahil) ve yüzlerce gereksiz UPDATE boşa gider.
+			//
+			// tokens + len(p.sem) < Concurrency → "kanalda uçuşta iş var": tokens az
+			// önce semafordan alındı, len(p.sem) kalan boşlar; toplamı Concurrency'den
+			// küçükse fark sender'ların elindedir. Okuma yarışa açık ama hata yönü
+			// güvenli: eski bir düşük değer bir claim'i atlar (zararsız), yüksek değer
+			// en fazla bir fazla satır çeker ve o satır bir kez ErrOpen yolundan geri
+			// döner — döngü kurulamıyor çünkü sonrasında poll.wait var.
+			if tokens+len(p.sem) < p.engine.cfg.Concurrency {
+				p.releaseTokens(tokens)
+
+				if !poll.wait(ctx) {
+					return
+				}
+
+				continue
+			}
+
+			if limit > 1 {
+				p.releaseTokens(limit - 1)
+				limit = 1
+			}
+
+		case breaker.StateClosed:
+			// Normal akış: limit boştaki sender sayısı kadar.
+		}
+
 		claimed, err := p.engine.queue.ClaimNotifications(
-			ctx, p.channel, tokens, p.engine.cfg.LeaseDuration)
+			ctx, p.channel, limit, p.engine.cfg.LeaseDuration)
 		if err != nil {
 			// Jetonlar BEKLEMEDEN ÖNCE geri veriliyor: aksi hâlde her hatalı turda
 			// semafordan jeton sızar ve havuz zamanla sessizce durur.
-			p.releaseTokens(tokens)
+			p.releaseTokens(limit)
 
 			// Hata döndürülmüyor: geçici bir veritabanı kopması bütün worker'ı
 			// düşürmemeli. Loglanıp backoff ile yeniden denenir.
@@ -142,7 +197,9 @@ func (p *channelPool) claimLoop(ctx context.Context) {
 		}
 
 		// Kuyrukta istediğimizden az iş vardı: kullanılmayan jetonlar geri veriliyor.
-		if unused := tokens - len(claimed); unused > 0 {
+		// Yarı açıkta limit 1'e indirildiği için hesap limit üzerinden yapılıyor;
+		// fazla jetonlar yukarıda zaten bırakıldı.
+		if unused := limit - len(claimed); unused > 0 {
 			p.releaseTokens(unused)
 		}
 
