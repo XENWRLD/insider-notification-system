@@ -106,7 +106,8 @@ func (h notificationHandler) createBatch(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 
 	outcome, err := h.store.CreateBatch(ctx, notifications, idem, func() any { return response })
-	if h.writeStoreOutcome(w, r, outcome, err, "batch oluşturma") {
+	if h.writeStoreOutcome(w, r, outcome, err, "batch oluşturma",
+		storedResource{field: "batch_id", prefix: "/api/v1/batches/"}) {
 		return
 	}
 

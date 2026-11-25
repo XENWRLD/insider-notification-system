@@ -4,6 +4,7 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -72,6 +73,17 @@ func NewRouter(deps Dependencies) http.Handler {
 		writeError(w, r, http.StatusNotFound, CodeNotFound, "kaynak bulunamadı")
 	})
 	router.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		// RFC 9110 §15.5.6: 405 yanıtı Allow header'ı TAŞIMAK ZORUNDA. chi'nin kendi
+		// handler'ı bunu yazıyor ama biz onu JSON hata zarfı için değiştirdiğimizden
+		// header kayboluyordu: istemci (ya da üretilmiş bir SDK) yolun hangi metodu
+		// kabul ettiğini makine-okunur biçimde keşfedemiyordu.
+		//
+		// chi'nin hesapladığı küme dışa kapalı (Context.methodsAllowed), bu yüzden
+		// router'ın kendi Match'i ile yeniden türetiliyor.
+		if allowed := allowedMethods(router, r.URL.Path); allowed != "" {
+			w.Header().Set("Allow", allowed)
+		}
+
 		writeError(w, r, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
 			"bu yol için HTTP method'u desteklenmiyor")
 	})
@@ -130,4 +142,32 @@ func NewRouter(deps Dependencies) http.Handler {
 	})
 
 	return router
+}
+
+// allowedMethods, verilen yolun kabul ettiği metotları Allow header değeri olarak
+// üretir.
+//
+// chi'nin 405 hesabındaki küme (Context.methodsAllowed) dışa kapalı olduğu için
+// router'ın Match'i her aday metotla sorgulanıyor. Liste kısa ve sorgu bellekte:
+// 405 yolunda çalıştığı için sıcak yol değil.
+func allowedMethods(routes chi.Routes, path string) string {
+	candidates := []string{
+		http.MethodGet,
+		http.MethodHead,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+		http.MethodOptions,
+	}
+
+	allowed := make([]string, 0, len(candidates))
+
+	for _, method := range candidates {
+		if routes.Match(chi.NewRouteContext(), method, path) {
+			allowed = append(allowed, method)
+		}
+	}
+
+	return strings.Join(allowed, ", ")
 }

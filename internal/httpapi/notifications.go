@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -222,7 +223,12 @@ func (h notificationHandler) idempotencyFor(
 // writeStoreOutcome, store'dan dönen hatayı veya saklanan cevabı yazar.
 // İş gerçekten yapıldıysa (replay değil) false döner ve çağıran kendi yanıtını yazar.
 func (h notificationHandler) writeStoreOutcome(
-	w http.ResponseWriter, r *http.Request, outcome store.Outcome, err error, operation string,
+	w http.ResponseWriter,
+	r *http.Request,
+	outcome store.Outcome,
+	err error,
+	operation string,
+	resource storedResource,
 ) bool {
 	if errors.Is(err, store.ErrIdempotencyKeyReused) {
 		writeError(w, r, http.StatusConflict, CodeConflict,
@@ -250,6 +256,17 @@ func (h notificationHandler) writeStoreOutcome(
 		)
 
 		w.Header().Set(IdempotentReplayHeader, "true")
+
+		// Location REPLAY'de de veriliyor. İlk hâlinde verilmiyordu ("tekrar
+		// gönderimde yeni kaynak oluşmadı" gerekçesiyle) ama sonuç şuydu: aynı mantıksal
+		// isteğin iki yanıtı YAPISAL OLARAK FARKLI oluyordu ve belgelenen
+		// "202 + Location" sözleşmesine göre yazılmış bir istemci, tam olarak
+		// idempotency'nin var olma sebebi olan ağ-tekrarı durumunda kırılıyordu.
+		// Kaynak zaten var; kimliği saklanan gövdeden okunuyor.
+		if path := resource.path(outcome.Body); path != "" {
+			w.Header().Set("Location", path)
+		}
+
 		// Saklanan gövde birebir yazılır; yeniden serialize edilmez.
 		writeStoredJSON(w, outcome.Status, outcome.Body)
 
@@ -257,6 +274,40 @@ func (h notificationHandler) writeStoreOutcome(
 	}
 
 	return false
+}
+
+// storedResource, saklanan bir cevaptan Location header'ını yeniden kurmak için
+// gereken bilgi: gövdedeki kimlik alanı ve kaynağın yol öneki.
+type storedResource struct {
+	field  string
+	prefix string
+}
+
+// path, saklanan gövdeden kaynağın yolunu üretir.
+//
+// Tolerant: gövde çözülemezse, alan yoksa ya da boşsa boş string döner ve çağıran
+// header'ı hiç yazmaz. Yanlış bir Location yazmak, hiç yazmamaktan kötü.
+func (s storedResource) path(body []byte) string {
+	if s.field == "" || len(body) == 0 {
+		return ""
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return ""
+	}
+
+	raw, ok := fields[s.field]
+	if !ok {
+		return ""
+	}
+
+	var id string
+	if err := json.Unmarshal(raw, &id); err != nil || id == "" {
+		return ""
+	}
+
+	return s.prefix + id
 }
 
 // create, tekil bildirim oluşturur.
@@ -313,7 +364,8 @@ func (h notificationHandler) create(w http.ResponseWriter, r *http.Request) {
 	render := func() any { return newNotificationResponse(notification) }
 
 	outcome, err := h.store.CreateNotification(ctx, notification, idem, render)
-	if h.writeStoreOutcome(w, r, outcome, err, "bildirim oluşturma") {
+	if h.writeStoreOutcome(w, r, outcome, err, "bildirim oluşturma",
+		storedResource{field: "id", prefix: "/api/v1/notifications/"}) {
 		return
 	}
 

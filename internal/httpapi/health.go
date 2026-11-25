@@ -49,7 +49,13 @@ func (h healthHandler) ready(w http.ResponseWriter, r *http.Request) {
 	for name, dependency := range h.dependencies {
 		if err := dependency.Ping(ctx); err != nil {
 			healthy = false
-			checks[name] = "error: " + err.Error()
+
+			// Hata METNI yanıta KONMUYOR, yalnızca log'a. pgx şifreyi maskeliyor ama
+			// kullanıcı adını, veritabanı adını, iç DNS adını, çözülmüş IP'yi ve
+			// portu maskelemiyor; bu uç ise geçerli bir gövde gerektirmeden
+			// erişilebilen tek uç. Hangi bağımlılığın bozuk olduğu anahtar adından
+			// zaten anlaşılıyor — teşhis için gereken bu, ayrıntı log'da.
+			checks[name] = "error"
 
 			h.logger.WarnContext(ctx, "readiness kontrolü başarısız",
 				slog.String("correlation_id", CorrelationID(ctx)),

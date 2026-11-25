@@ -137,7 +137,36 @@ func TestIdempotentReplayWritesStoredBodyWithoutReserializing(t *testing.T) {
 
 	require.Nil(t, stub.saved, "tekrar gönderimde iş yapılmamalı")
 
-	// Location header'ı verilmiyor: tekrar gönderimde yeni kaynak oluşmadı.
+	// Location REPLAY'de de veriliyor ve saklanan gövdedeki kimlikten kuruluyor.
+	//
+	// İlk hâlinde verilmiyordu ("tekrar gönderimde yeni kaynak oluşmadı" gerekçesiyle)
+	// ama sonuç şuydu: aynı mantıksal isteğin iki yanıtı YAPISAL OLARAK FARKLI oluyordu
+	// ve belgelenen "202 + Location" sözleşmesine göre yazılmış bir istemci, tam olarak
+	// idempotency'nin var olma sebebi olan ağ-tekrarı durumunda kırılıyordu. Kaynak
+	// zaten var; istemcinin onu bulmak için gövdeyi ayrıştırmak zorunda kalması
+	// gereksiz bir özel durum.
+	require.Equal(t, "/api/v1/notifications/22222222-2222-2222-2222-222222222222",
+		recorder.Header().Get("Location"))
+}
+
+// TestIdempotentReplayOmitsLocationWhenBodyHasNoID, saklanan gövdeden kimlik
+// okunamadığında header'ın hiç yazılmadığını doğrular: yanlış bir Location yazmak,
+// hiç yazmamaktan kötü.
+func TestIdempotentReplayOmitsLocationWhenBodyHasNoID(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubNotificationStore{
+		outcome: store.Outcome{
+			Replayed: true,
+			Status:   http.StatusAccepted,
+			Body:     []byte(`{"status":"pending"}`),
+		},
+	}
+
+	recorder := postWithKey(t, newNotificationRouter(stub), "k-2", validSingleBody)
+
+	require.Equal(t, http.StatusAccepted, recorder.Code)
+	require.Equal(t, "true", recorder.Header().Get(IdempotentReplayHeader))
 	require.Empty(t, recorder.Header().Get("Location"))
 }
 

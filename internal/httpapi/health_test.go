@@ -86,7 +86,11 @@ func TestReadyReturns503AndNamesBrokenDependency(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	require.Equal(t, "unavailable", body.Status)
 	require.Equal(t, "ok", body.Checks["postgres"])
-	require.Contains(t, body.Checks["redis"], "connection refused")
+
+	// Hangi bağımlılığın bozuk olduğu ANAHTAR ADINDAN anlaşılıyor; hata METNİ
+	// yanıta konmuyor (bkz. TestReadyDoesNotLeakDependencyDetails). Teşhis için
+	// gereken bu kadarı, ayrıntı log'da.
+	require.Equal(t, "error", body.Checks["redis"])
 }
 
 func TestCorrelationIDIsEchoedWhenProvided(t *testing.T) {
@@ -207,4 +211,77 @@ func TestMetricsEndpointAbsentWithoutCollector(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, recorder.Code)
 	require.Contains(t, recorder.Body.String(), "correlation_id",
 		"404 de hata zarfını kullanmalı")
+}
+
+// TestReadyDoesNotLeakDependencyDetails, 503 gövdesinin iç ayrıntı sızdırmadığını
+// doğrular.
+//
+// Regresyon: ham hata metni gövdeye konuyordu. pgx şifreyi maskeliyor ama kullanıcı
+// adını, veritabanı adını, iç DNS adını, çözülmüş IP'yi ve portu maskelemiyor — ve bu,
+// geçerli bir gövde gerektirmeden erişilebilen tek uç. Hangi bağımlılığın bozuk olduğu
+// anahtar adından anlaşılıyor; ayrıntı log'da kalmalı.
+func TestReadyDoesNotLeakDependencyDetails(t *testing.T) {
+	t.Parallel()
+
+	leak := "failed to connect to `user=insider database=notifications`: " +
+		"10.1.2.3:5432 (db-prod-internal.svc.cluster.local): dial error"
+
+	router := newTestRouter(map[string]Pinger{
+		"postgres": stubPinger{err: errors.New(leak)},
+		"redis":    stubPinger{},
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder,
+		httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health/ready", nil))
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+
+	body := recorder.Body.String()
+
+	require.NotContains(t, body, "user=insider")
+	require.NotContains(t, body, "db-prod-internal")
+	require.NotContains(t, body, "10.1.2.3")
+	require.NotContains(t, body, "dial error")
+
+	// Hangi bağımlılığın bozuk olduğu yine görünmeli.
+	require.JSONEq(t,
+		`{"status":"unavailable","checks":{"postgres":"error","redis":"ok"}}`, body)
+}
+
+// TestMethodNotAllowedCarriesAllowHeader, 405 yanıtının Allow header'ı taşıdığını
+// doğrular (RFC 9110 §15.5.6).
+//
+// Regresyon: chi'nin kendi handler'ı Allow yazıyordu ama JSON hata zarfı için
+// değiştirdiğimizde header kayboluyordu; istemci yolun hangi metodu kabul ettiğini
+// makine-okunur biçimde keşfedemiyordu.
+func TestMethodNotAllowedCarriesAllowHeader(t *testing.T) {
+	t.Parallel()
+
+	router := newTestRouter(map[string]Pinger{"postgres": stubPinger{}})
+
+	tests := []struct {
+		method string
+		path   string
+		expect []string
+	}{
+		{http.MethodDelete, "/api/v1/notifications", []string{"GET", "POST"}},
+		{http.MethodPut, "/api/v1/notifications", []string{"GET", "POST"}},
+		{http.MethodPost, "/health/live", []string{"GET", "HEAD"}},
+	}
+
+	for _, test := range tests {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder,
+			httptest.NewRequestWithContext(t.Context(), test.method, test.path, nil))
+
+		require.Equal(t, http.StatusMethodNotAllowed, recorder.Code, test.path)
+
+		allow := recorder.Header().Get("Allow")
+		require.NotEmpty(t, allow, "%s %s için Allow header'ı olmalı", test.method, test.path)
+
+		for _, method := range test.expect {
+			require.Contains(t, allow, method, "%s %s", test.method, test.path)
+		}
+	}
 }

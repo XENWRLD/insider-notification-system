@@ -48,14 +48,23 @@ ps: ## Servis durumlarini listeler
 build: ## Tum binary'leri bin/ altina derler
 	$(GO) build -o bin/ ./...
 
+# DOTENV: .env'i process ortamina yukler.
+#
+# GNU Make .env'i KENDILIGINDEN okumaz ve `env` hedefi dosyayi yalnizca olusturur.
+# Bu olmadan `make run` / `make run-worker` config.Load'da aninda oluyordu:
+# "gecersiz yapilandirma: DATABASE_URL zorunlu; REDIS_URL zorunlu; PROVIDER_URL zorunlu"
+# — yani .env.example'in tam bu senaryo icin koydugu localhost DSN'lerine hic
+# ulasilmiyordu. `set -a` sonraki atamalari otomatik export ediyor.
+DOTENV = set -a; . ./.env; set +a;
+
 run: env ## API'yi host'ta calistirir (postgres ve redis compose'da olmali)
-	$(GO) run ./cmd/api
+	$(DOTENV) $(GO) run ./cmd/api
 
 run-mock: ## Sahte saglayiciyi host'ta calistirir
 	$(GO) run ./cmd/mockprovider
 
-run-worker: ## Worker'i host'ta calistirir (postgres compose'da olmali)
-	$(GO) run ./cmd/worker
+run-worker: env ## Worker'i host'ta calistirir (postgres ve redis compose'da olmali)
+	$(DOTENV) $(GO) run ./cmd/worker
 
 logs-worker: ## Worker loglarini izler
 	$(COMPOSE) logs -f worker

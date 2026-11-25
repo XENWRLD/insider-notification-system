@@ -111,6 +111,25 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 		http: &http.Client{
 			Timeout:   cfg.Timeout,
 			Transport: transport,
+
+			// YÖNLENDİRME TAKİP EDİLMİYOR.
+			//
+			// Go'nun varsayılanı 10 hop'a kadar takip etmek ve 301/302/303'te isteği
+			// GÖVDESİZ GET'e dönüştürmek. Sonuç: PROVIDER_URL yönlendirme dönerse
+			// mesaj hiç iletilmiyor ama hedefteki 2xx "başarı" sayılıp satır sent
+			// yazılıyordu — classify bunu göremiyor çünkü Send başarı bildiriyor.
+			//
+			// İkinci sorun: hop hedefi keyfi (link-local metadata, cluster içi
+			// servisler) ve Go özel header'ları (Idempotency-Key, istemci
+			// kontrolündeki X-Correlation-ID) oraya da taşıyor; hedefin hata gövdesi
+			// de last_error üzerinden kimlik doğrulamasız okuma uçlarında görünüyor.
+			//
+			// ErrUseLastResponse ile 3xx olduğu gibi dönüyor ve StatusError'a
+			// çevriliyor: sınıflandırma onu kanal arızası sayıyor, yani devre açılıyor
+			// ve mesajlar ölmek yerine yapılandırma düzeltilene kadar bekliyor.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		logger: logger,
 	}, nil

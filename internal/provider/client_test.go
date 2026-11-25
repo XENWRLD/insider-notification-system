@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -467,4 +468,38 @@ func TestSendKeepsErrorBodyWritableToDatabase(t *testing.T) {
 	require.True(t, utf8.ValidString(statusErr.Error()),
 		"hata mesajının tamamı da geçerli olmalı: veritabanına giden metin bu")
 	require.LessOrEqual(t, len(statusErr.Body), errorBodyExcerpt+len("…"))
+}
+
+// TestSendDoesNotFollowRedirects, yönlendirmenin TAKİP EDİLMEDİĞİNİ doğrular.
+//
+// Regresyon: Go'nun varsayılanı 10 hop'a kadar takip etmek ve 301/302/303'te isteği
+// GÖVDESİZ GET'e dönüştürmek. Sonuç: PROVIDER_URL yönlendirme dönerse mesaj hiç
+// iletilmiyor ama hedefteki 2xx başarı sayılıp satır `sent` yazılıyordu — classify
+// bunu göremiyor, çünkü Send başarı bildiriyor. Ayrıca hop hedefi keyfi ve özel
+// header'lar (istemci kontrolündeki X-Correlation-ID dahil) oraya da taşınıyordu.
+func TestSendDoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+
+	var targetHits atomic.Int64
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"messageId":"hedeften"}`))
+	}))
+	defer target.Close()
+
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL+"/ic-servis")
+		w.WriteHeader(http.StatusFound)
+	})
+
+	resp, err := client.Send(context.Background(), testRequest())
+
+	require.Zero(t, targetHits.Load(), "yönlendirme hedefine İSTEK GİTMEMELİ")
+	require.Empty(t, resp.MessageID, "hedefin mesaj kimliği kabul edilmemeli")
+
+	var statusErr *StatusError
+	require.ErrorAs(t, err, &statusErr, "3xx hata olarak dönmeli: %v", err)
+	require.Equal(t, http.StatusFound, statusErr.StatusCode)
 }
