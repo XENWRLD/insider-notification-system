@@ -20,31 +20,16 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   `cmd/worker`; dört commit),
   Adım 7 (dağıtık rate limit: `internal/ratelimit` GCRA kovası, izin sender'da,
   fail closed, starvation belgelendi; üç commit)
-- **Devam eden: Adım 8** — retry politikası + kanal başına circuit breaker.
-  Plan dört commit'e bölündü ve **1'i bitti**:
-  1. ✅ `feat: add per-channel circuit breaker` — `internal/breaker`
-     (`Breaker` arayüzü, `ErrOpen`, üç yollu `IsFailure`, `AlwaysClosed()`),
-     `sony/gobreaker/v2` sarmalayıcısı, 16 birim testi. Worker'a dokunmadı.
-  2. ⬜ `feat: add deferred lease hand-back to the store` — `store.DeferLeases`
-     (denemeyi saymadan, sebebiyle, istenirse ileri tarihli geri verme).
-  3. ⬜ `feat: implement retry policy and circuit breaker` — `classify.go` yeniden
-     yazımı (`decision`/`action`/`breakerOutcome`), `send.go`'da iki breaker kapısı,
-     `channel.go`'da claimer kapısı, `Config` alanları, `cmd/worker`, compose/env.
-  4. ⬜ `fix: shield the claim query from shutdown cancellation` — `claimCtx`
-     (`context.WithoutCancel` + `ClaimTimeout`), ardından PLAN kutucukları,
-     `CLAUDE.md` **Durum**, öğrenme notu `adim-08-retry-breaker.md`.
-
-  **Onaylı plan:** `docs/plans/adim-08-plan.md`
-  — beş tur gözden geçirmeden geçti ve dört gerçek açığı kapatıyor (zehirli mesaj
-  sonsuz döngüsü, tek mesajın kanalı kilitlemesi, yarı açıkta sıcak döngünün
-  paylaşılan Redis bütçesini tüketmesi, `ORDER BY priority_rank`'in erteleme
-  hesabını bozması). Kararların gerekçesi orada; plan okunmadan 2–4 arası
-  commit'lere girilmemeli.
-- **Düzeltme:** Adım 6'da yazılan "**yalnızca `classify.go` gövdesi değişecek**"
-  ifadesi **yanlış** (`classify.go:19-25` yorumunda da duruyor, Adım 8'in 3. commit'inde
-  düzeltilecek). Devre açıkken mesajların deneme hakkı ve rate limit izni harcamaması
-  için `channel.go`'daki claim döngüsünün de durması zorunlu — PLAN §2'nin
-  "açıkken o kanaldan iş çekilmez" ifadesi doğru olan.
+  Adım 8 (retry politikası + kanal başına circuit breaker: `internal/breaker`,
+  `store.DeferLeases`, `classify.go` yeniden yazımı, iki breaker kapısı + claimer
+  kapısı, claim sorgusunun kapanıştan muafiyeti; dört commit — onaylı plan
+  `docs/plans/adim-08-plan.md`)
+- **Devam eden: Adım 9** — gözlemlenebilirlik (`/metrics`).
+- **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu); beşi Adım 8'i
+  bloke ettiği için `fix: close review defects blocking step 8` ile düzeltildi
+  (`excerpt` rune kesmesi, mock 4 KiB gövde sınırı, izin bekleme bütçesi, lease geri
+  verme yorumu, sağlık uçlarının HEAD'i). Kalan bulgular ve düzeltme sırası
+  `docs/review/findings.md` içinde (gitignore'da).
 - **Henüz boş** (`.gitkeep`): `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
   `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`,

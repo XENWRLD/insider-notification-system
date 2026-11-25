@@ -534,3 +534,109 @@ func TestHandleSkipsNotificationWithoutLease(t *testing.T) {
 	require.Zero(t, sender.callCount(), "token'sız satır sağlayıcıya gönderilmemeli")
 	require.Empty(t, queue.completedResults())
 }
+
+// TestClaimSurvivesShutdownCancellation, claim sorgusunun kapanış sinyalinden MUAF
+// olduğunu doğrular.
+//
+// Regresyon: claim iptal edilebilir ctx ile koşuyordu. SIGTERM sorgunun ortasına denk
+// gelirse pgx'in iptal isteği sunucudaki commit ile yarışır; commit olmuşsa satırlar
+// processing'de, lease'li ve attempt_count'ları artmış hâlde kalır ve worker
+// kimliklerini HİÇ öğrenmediği için geri veremez — lease dolana kadar (60 sn) kimseye
+// gitmezler. Kanal başına Concurrency, üç kanalda kopya başına 60 satıra kadar.
+func TestClaimSurvivesShutdownCancellation(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Concurrency = 2
+
+	// Kuyruk her zaman dolu: iptal hangi ana denk gelirse gelsin claim satır döndürür.
+	queue := &stubQueue{alwaysFull: true}
+	sender := &stubSender{resp: acceptedResponse()}
+	engine := newTestEngine(t, cfg, queue, sender)
+
+	pool := newChannelPool(engine, domain.ChannelSMS)
+
+	// Context BAŞTAN iptal edilmiş: claimLoop'un döngü başı kontrolü ya da
+	// acquireTokens'ın select'i döndürebilir, ama bir claim yapılırsa gelen ctx
+	// MUAF olmalı.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		pool.run(ctx)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("havuz kapanmadı")
+	}
+
+	for i, cancelled := range queue.claimContextsCancelled() {
+		require.False(t, cancelled,
+			"claim #%d iptal edilmiş context aldı: commit olmuş bir UPDATE'in satırları kaybolur", i)
+	}
+
+	require.Len(t, pool.sem, cfg.Concurrency, "kapanışta tüm jetonlar geri verilmeli")
+}
+
+// TestClaimedRowsAreHandedBackWhenShutdownRacesDispatch, iptal edilmiş context ile
+// claim edilen satırların kuyruğa geri verildiğini doğrular: muafiyet satırların
+// öğrenilmesini sağlıyor, geri verme de onları reaper'ı beklemekten kurtarıyor.
+func TestClaimedRowsAreHandedBackWhenShutdownRacesDispatch(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Concurrency = 2
+
+	notifications := []*domain.Notification{
+		newTestNotification(domain.ChannelSMS, 1),
+		newTestNotification(domain.ChannelSMS, 1),
+	}
+
+	queue := &stubQueue{claims: []claimCall{{notifications: notifications}}}
+	sender := &stubSender{resp: acceptedResponse()}
+	engine := newTestEngine(t, cfg, queue, sender)
+
+	pool := newChannelPool(engine, domain.ChannelSMS)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		pool.run(ctx)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("havuz kapanmadı")
+	}
+
+	// Satırlar ya hiç claim edilmedi (döngü başı kontrolü kazandı) ya da claim edilip
+	// geri verildi. Hiçbir durumda "claim edilmiş ama kimse bilmiyor" kalmamalı.
+	claimed := 0
+	for _, limit := range queue.claimLimits() {
+		claimed += limit
+	}
+
+	if claimed == 0 {
+		t.Skip("iptal claim'den önce kazandı: bu turda ölçülecek bir şey yok")
+	}
+
+	handedBack := 0
+	for _, holds := range queue.releasedHolds() {
+		handedBack += len(holds)
+	}
+
+	require.Positive(t, handedBack, "claim edilen satırlar kuyruğa geri verilmeli")
+	require.Len(t, pool.sem, cfg.Concurrency)
+}

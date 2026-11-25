@@ -78,6 +78,13 @@ type Config struct {
 	// LeaseDuration, claim edilen satırın sahiplik süresi.
 	LeaseDuration time.Duration
 
+	// ClaimTimeout, TEK claim sorgusunun üst sınırı.
+	//
+	// Claim sorgusu kapanıştan MUAF (bkz. claimLoop), yani iptal edilebilir context
+	// yerine kendi zaman aşımıyla sınırlanıyor. Bu süre aynı zamanda kapanışın üst
+	// sınırına eklenir: ClaimTimeout + DrainTimeout < compose stop_grace_period.
+	ClaimTimeout time.Duration
+
 	// PollMinInterval/PollMaxInterval, kuyruk boş veya hatalıyken beklenen süre
 	// aralığı. Full jitter uygulanır ki worker kopyaları aynı anda sorgu atmasın.
 	PollMinInterval time.Duration
@@ -161,6 +168,7 @@ func (c Config) validate() error {
 		{"ProviderTimeout", c.ProviderTimeout},
 		{"ResultTimeout", c.ResultTimeout},
 		{"DrainTimeout", c.DrainTimeout},
+		{"ClaimTimeout", c.ClaimTimeout},
 		{"RetryBaseDelay", c.RetryBaseDelay},
 		{"RetryMaxDelay", c.RetryMaxDelay},
 		{"BreakerOpenTimeout", c.BreakerOpenTimeout},

@@ -177,8 +177,7 @@ func (p *channelPool) claimLoop(ctx context.Context) {
 			// Normal akış: limit boştaki sender sayısı kadar.
 		}
 
-		claimed, err := p.engine.queue.ClaimNotifications(
-			ctx, p.channel, limit, p.engine.cfg.LeaseDuration)
+		claimed, err := p.claim(ctx, limit)
 		if err != nil {
 			// Jetonlar BEKLEMEDEN ÖNCE geri veriliyor: aksi hâlde her hatalı turda
 			// semafordan jeton sızar ve havuz zamanla sessizce durur.
@@ -222,6 +221,27 @@ func (p *channelPool) claimLoop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// claim, iş çekme sorgusunu KAPANIŞTAN MUAF bir context ile çalıştırır.
+//
+// ctx doğrudan geçilseydi SIGTERM sorguyu ORTADA kesebilirdi — ve pgx'in iptal isteği
+// sunucudaki commit ile yarışıyor. Commit olmuşsa satırlar processing'de, lease'li ve
+// attempt_count'ları artmış hâlde kalır; worker kimliklerini HİÇ öğrenmediği için
+// kuyruğa geri veremez ve satırlar lease süresi dolana kadar (60 sn) kimseye gitmez.
+// Kanal başına Concurrency satıra kadar, üç kanalda kopya başına 60 satıra kadar.
+//
+// WithoutCancel ile sorgu tamamlanır ve satırlar dönerse öğrenilir; ctx zaten iptal
+// olduğu için dispatchAll hiçbirini dağıtmaz ve claimLoop hepsini anında geri verir.
+// Belirsizlik yok edilmiyor, BİZİM SEÇTİĞİMİZ bir süreyle (ClaimTimeout)
+// sınırlandırılıyor: kalan tek pencere sorgunun kendi zaman aşımına takılması.
+func (p *channelPool) claim(ctx context.Context, limit int) ([]*domain.Notification, error) {
+	claimCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), p.engine.cfg.ClaimTimeout)
+	defer cancel()
+
+	return p.engine.queue.ClaimNotifications(
+		claimCtx, p.channel, limit, p.engine.cfg.LeaseDuration)
 }
 
 // acquireTokens, en az bir, en fazla ClaimBatchSize kadar jeton toplar.

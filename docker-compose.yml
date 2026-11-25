@@ -144,8 +144,8 @@ services:
         condition: service_completed_successfully
       mockprovider:
         condition: service_healthy
-    # SHUTDOWN penceresinden (WORKER_DRAIN_TIMEOUT) uzun: uçan gönderimler ve
-    # sonuç yazımları bitsin, iş kaybı olmasın.
+    # Kapanış penceresinden uzun: WORKER_CLAIM_TIMEOUT (3s, claim kapanıştan muaf) +
+    # WORKER_DRAIN_TIMEOUT (20s, uçan gönderim + sonuç yazımı) = 23s < 30s.
     stop_grace_period: 30s
     restart: unless-stopped
 

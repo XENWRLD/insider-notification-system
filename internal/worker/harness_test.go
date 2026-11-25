@@ -38,6 +38,7 @@ func testConfig() Config {
 		ProviderTimeout: time.Second,
 		ResultTimeout:   time.Second,
 		DrainTimeout:    5 * time.Second,
+		ClaimTimeout:    time.Second,
 		RateWaitMax:     300 * time.Millisecond,
 
 		RetryBaseDelay:          5 * time.Millisecond,
@@ -101,6 +102,10 @@ type stubQueue struct {
 	// channels, üretilen her satırın kanalını tutar (channelOf ile okunur).
 	channels map[uuid.UUID]domain.Channel
 
+	// claimCtxDone, her claim çağrısına gelen context'in iptal edilmiş olup olmadığı:
+	// kapanıştan muafiyetin kanıtı.
+	claimCtxDone []bool
+
 	completed   []store.NotificationResult
 	completeErr error
 	// completeCtxDone, sonuç yazımına gelen context'in iptal edilmiş olup olmadığını
@@ -120,12 +125,13 @@ type stubQueue struct {
 }
 
 func (q *stubQueue) ClaimNotifications(
-	_ context.Context, channel domain.Channel, limit int, _ time.Duration,
+	ctx context.Context, channel domain.Channel, limit int, _ time.Duration,
 ) ([]*domain.Notification, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	q.claimArgs = append(q.claimArgs, limit)
+	q.claimCtxDone = append(q.claimCtxDone, ctx.Err() != nil)
 
 	var claimed []*domain.Notification
 
@@ -257,6 +263,15 @@ func (q *stubQueue) completedResults() []store.NotificationResult {
 }
 
 // claimLimits, claim sorgusuna geçilen limitlerin kopyasını verir.
+// claimContextsCancelled, claim çağrılarına iptal edilmiş context gelip gelmediğini
+// döner.
+func (q *stubQueue) claimContextsCancelled() []bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return append([]bool(nil), q.claimCtxDone...)
+}
+
 func (q *stubQueue) claimLimits() []int {
 	q.mu.Lock()
 	defer q.mu.Unlock()

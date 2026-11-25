@@ -305,14 +305,42 @@ Go konvansiyonu: `_test.go` dosyaları test ettikleri kodun yanında durur.
         (her tam saniyede tam 96, maks 96) — hız ARTMIYOR ve **sınır hiç aşılmıyor**.
         Toplam sağlayıcı isteği 1000 (çift gönderim yok). Kanal izolasyonu: 562 SMS
         kuyrukta beklerken 5 e-posta 1.09 sn'de gönderildi
-- [ ] **Adım 8 — Retry + hata yönetimi:** sınıflandırma, backoff + jitter, attempts tablosu, circuit breaker → `feat: implement retry policy and circuit breaker`
-  - [ ] Yalnızca `internal/worker/classify.go` gövdesi değişecek (Adım 6 dikişi):
-        400/422 → hemen `failed`; 429 → `provider.StatusError.RetryAfter`;
-        5xx/timeout → `min(2s × 2^(n-1), 5dk)` + full jitter. `attempts` tablosu
-        Adım 6'da zaten yazılıyor, sabit 5 sn gecikme oradan kalkacak
-  - [ ] Claim sorgusu iptal edilebilir ctx ile çalışıyor; kapanış tam claim sırasında
-        gelirse satırlar reaper'a kadar (~60 sn) bekler. Claim'i de kapanıştan muaf
-        tutmak mı, yoksa lease süresini bu pencereye göre mi ayarlamak gerekiyor?
+- [x] **Adım 8 — Retry + hata yönetimi:** sınıflandırma, backoff + jitter, attempts tablosu, circuit breaker → `feat: implement retry policy and circuit breaker`
+      *(adım dört commit'e bölündü: `feat: add per-channel circuit breaker`,
+      `feat: add deferred lease hand-back to the store`,
+      `feat: implement retry policy and circuit breaker`,
+      `fix: shield the claim query from shutdown cancellation`)*
+  - [x] **"Yalnızca `classify.go` değişecek" varsayımı YANLIŞTI** ve düzeltildi:
+        devre açıkken mesajların deneme hakkı ve rate limit izni harcamaması için
+        `channel.go`'daki claim döngüsünün de durması zorunlu. PLAN §6'nın "açıkken o
+        kanaldan iş çekilmez" ifadesi doğru olan
+  - [x] 400/422 ve tanınmayan 4xx → hemen `failed`; 401/403/404 → `failed` DEĞİL
+        (yapılandırma hatası, mesajlar geçerli → devre açılır, operatör düzeltince
+        birikmiş kuyruk akar); 429 → `Retry-After`'a uyar, deneme HARCAMAZ, devrede
+        "excluded"; 5xx/bağlantı → devre kapalıysa normal retry, devraldıysa denemesiz
+        requeue; timeout → her durumda deneme sayılır (belirsiz)
+  - [x] Backoff `jitter(min(2s × 2^(n-1), 5dk))`; `WORKER_RETRY_DELAY` kaldırıldı,
+        yerine `WORKER_RETRY_BASE_DELAY` / `WORKER_RETRY_MAX_DELAY`
+  - [x] **Zehirli mesaj açığı:** denemeyi koşulsuz saymamak, tek bir mesaja hep 500
+        dönen sağlayıcıda sonsuz döngü üretiyordu (araya giren başarılar ardışık
+        sayacı sıfırladığı için devre hiç açılmıyor). Muafiyet "breaker devraldıysa"
+        durumuna daraltıldı
+  - [x] **Erteleme `2 × BreakerOpenTimeout`:** tek kat yetmiyor çünkü claim sırası
+        `ORDER BY priority_rank, available_at` — öncelik zamandan ÖNCE geliyor, yani
+        yüksek öncelikli zehirli mesaj bir sonraki yarı açık sondada yine seçilirdi
+  - [x] **Yarı açıkta uçuşta iş varken claim yok:** olmadan, sonda uçuşurken her
+        poll turu bir satır daha çekiyor ve paylaşılan Redis bütçesi saniyeler içinde
+        tükeniyordu
+  - [x] **Açık soru cevaplandı: claim sorgusu kapanıştan MUAF** (`context.WithoutCancel`
+        + `WORKER_CLAIM_TIMEOUT=3s`). ctx doğrudan geçildiğinde SIGTERM sorguyu ortada
+        kesiyor ve commit olmuş bir `UPDATE`'in satırları öğrenilmeden kalıyordu
+        (kopya başına 60 satıra kadar, lease dolana dek görünmez). Lease süresini bu
+        pencereye göre büyütmek REDDEDİLDİ: belirsizliği yok etmiyor, yalnızca
+        erteliyordu. Kapanış ≈ `3 + 20 = 23 sn < stop_grace_period 30 sn`
+  - [x] **Worker tarafı lease token'ı üretme seçeneği REDDEDİLDİ:** claim partisinin
+        tek token'ı paylaşması pencereyi tamamen kapatırdı ama Adım 6'nın "token'ı
+        worker uydurmaz, tek kaynak DB" kararını ve claim SQL'ini değiştiriyor;
+        kalan risk (nadir, satır kaybı yok, en kötü 60 sn gecikme) bunu hak etmiyor
 - [ ] **Adım 9 — Gözlemlenebilirlik:** `/metrics`, uçtan uca correlation ID, `/health/ready` → `feat: add metrics, structured logging and health checks`
   - [ ] Worker metrikleri (gönderim gecikmesi, sent/failed sayaçları) worker process'inde
         oluşuyor: worker'a ayrı portta /metrics mi açılacak, yoksa API metrikleri DB'den

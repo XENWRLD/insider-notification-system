@@ -137,6 +137,7 @@ func run() error {
 		ProviderTimeout: cfg.WorkerProviderTimeout,
 		ResultTimeout:   cfg.WorkerResultTimeout,
 		DrainTimeout:    cfg.WorkerDrainTimeout,
+		ClaimTimeout:    cfg.WorkerClaimTimeout,
 		RateWaitMax:     cfg.WorkerRateWaitMax,
 		ReaperInterval:  cfg.WorkerReaperInterval,
 		ReaperBatchSize: cfg.WorkerReaperBatchSize,

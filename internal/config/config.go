@@ -63,6 +63,9 @@ type Config struct {
 	WorkerResultTimeout time.Duration
 	// WorkerDrainTimeout, kapanışta uçan gönderimler için beklenen süre.
 	WorkerDrainTimeout time.Duration
+	// WorkerClaimTimeout, tek claim sorgusunun üst sınırı. Claim kapanıştan muaf
+	// olduğu için süresini bu değer belirliyor.
+	WorkerClaimTimeout time.Duration
 	// WorkerRetryBaseDelay/WorkerRetryMaxDelay, exponential backoff penceresinin
 	// sınırları: gecikme = jitter(min(base × 2^(deneme-1), max)).
 	WorkerRetryBaseDelay time.Duration
@@ -167,6 +170,7 @@ func Load() (Config, error) {
 		{"WORKER_PROVIDER_TIMEOUT", &cfg.WorkerProviderTimeout, 10 * time.Second},
 		{"WORKER_RESULT_TIMEOUT", &cfg.WorkerResultTimeout, 3 * time.Second},
 		{"WORKER_DRAIN_TIMEOUT", &cfg.WorkerDrainTimeout, 20 * time.Second},
+		{"WORKER_CLAIM_TIMEOUT", &cfg.WorkerClaimTimeout, 3 * time.Second},
 		{"WORKER_RETRY_BASE_DELAY", &cfg.WorkerRetryBaseDelay, 2 * time.Second},
 		{"WORKER_RETRY_MAX_DELAY", &cfg.WorkerRetryMaxDelay, 5 * time.Minute},
 		{"WORKER_BREAKER_OPEN_TIMEOUT", &cfg.WorkerBreakerOpenTimeout, 30 * time.Second},
