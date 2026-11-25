@@ -24,12 +24,22 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   `store.DeferLeases`, `classify.go` yeniden yazımı, iki breaker kapısı + claimer
   kapısı, claim sorgusunun kapanıştan muafiyeti; dört commit — onaylı plan
   `docs/plans/adim-08-plan.md`)
-- **Devam eden: Adım 9** — gözlemlenebilirlik (`/metrics`).
-- **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu); beşi Adım 8'i
-  bloke ettiği için `fix: close review defects blocking step 8` ile düzeltildi
-  (`excerpt` rune kesmesi, mock 4 KiB gövde sınırı, izin bekleme bütçesi, lease geri
-  verme yorumu, sağlık uçlarının HEAD'i). Kalan bulgular ve düzeltme sırası
-  `docs/review/findings.md` içinde (gitignore'da).
+  Adım 9 (gözlemlenebilirlik: API'de tek `/metrics`, değerler DB'den — kuyruk
+  derinliği, son 15 dk terminal sayımı, uçtan uca ve sağlayıcı gecikmesi yüzdelikleri,
+  kopya başına devre kesici durumu; `internal/breakerstate`, `migrations/000005`),
+  CI (GitHub Actions: lint + `go test -race` + testcontainers)
+- **Devam eden: 3. gün teslimi.** Kalan sıra: **OpenAPI + Swagger UI** → Scheduled
+  bonusu → polish → **README**. Kapsam dışı bırakılanlar: WebSocket, Template,
+  tracing, k6, Grafana.
+- **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu). Düzeltilenler:
+  A grubu (`fix: close review defects blocking step 8` — `excerpt` rune kesmesi,
+  mock gövde sınırı, izin bekleme bütçesi, lease geri verme yorumu, sağlık uçlarının
+  HEAD'i), B grubu (`fix: close review group B defects` — sağlayıcı yönlendirmesi,
+  `/health/ready` sızıntısı, compose `HTTP_PORT`, replay `Location`, 405 `Allow`,
+  `make run`'ın `.env`'i), ve `.env.example`'daki canlı webhook URL'i.
+  **Kalan bulgular, düzeltme sırası, README'ye girecek maddeler ve teslim durumu
+  `docs/review/findings.md` içinde** (gitignore'da; dosyanın başındaki **DEVİR**
+  bölümü bir sonraki oturumun giriş noktasıdır).
 - **Henüz boş** (`.gitkeep`): `api`, `deploy`, `loadtest`
 - **Doğrulama:** `make lint && make test && make up-build`, ardından
   `curl localhost:8080/health/ready` → `{"checks":{"postgres":"ok","redis":"ok"},"status":"ready"}`,
