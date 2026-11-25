@@ -42,6 +42,13 @@ type Queue interface {
 
 	ReleaseLeases(ctx context.Context, holds []store.LeaseHold) (int64, error)
 
+	// DeferLeases, denemeyi SAYMADAN geri verir: 429 ve devre kesicinin devraldığı
+	// gönderimler için. ReleaseLeases'ten farkı sebebi yazması ve isteğe bağlı
+	// erteleme uygulaması.
+	DeferLeases(
+		ctx context.Context, holds []store.LeaseHold, delay time.Duration, reason string,
+	) (int64, error)
+
 	ReclaimExpiredLeases(ctx context.Context, limit int) ([]store.ReclaimedNotification, error)
 
 	DeleteExpiredIdempotencyKeys(ctx context.Context, ttl time.Duration, batchSize int) (int64, error)

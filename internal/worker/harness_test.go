@@ -104,6 +104,7 @@ type stubQueue struct {
 	onComplete      func()
 
 	released [][]store.LeaseHold
+	deferred []deferredHold
 
 	reclaimCalls atomic.Int64
 	cleanupCalls atomic.Int64
@@ -191,6 +192,26 @@ func (q *stubQueue) CompleteNotification(ctx context.Context, res store.Notifica
 func (q *stubQueue) ReleaseLeases(_ context.Context, holds []store.LeaseHold) (int64, error) {
 	q.mu.Lock()
 	q.released = append(q.released, holds)
+	q.mu.Unlock()
+
+	q.outstanding.Add(-int64(len(holds)))
+
+	return int64(len(holds)), nil
+}
+
+// deferredHold, DeferLeases ile geri verilen bir partinin kaydı: testler hem
+// satırları hem uygulanan gecikmeyi/sebebi okuyor.
+type deferredHold struct {
+	holds  []store.LeaseHold
+	delay  time.Duration
+	reason string
+}
+
+func (q *stubQueue) DeferLeases(
+	_ context.Context, holds []store.LeaseHold, delay time.Duration, reason string,
+) (int64, error) {
+	q.mu.Lock()
+	q.deferred = append(q.deferred, deferredHold{holds: holds, delay: delay, reason: reason})
 	q.mu.Unlock()
 
 	q.outstanding.Add(-int64(len(holds)))

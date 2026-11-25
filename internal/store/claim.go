@@ -173,3 +173,62 @@ func (s *Store) ReleaseLeases(ctx context.Context, holds []LeaseHold) (int64, er
 
 	return tag.RowsAffected(), nil
 }
+
+// deferLeasesQuery, denemeyi saymadan işi kuyruğa geri verir, sebebini yazar ve
+// istenirse ileri tarihler.
+//
+// ReleaseLeases'ten iki farkı var:
+//
+//   - last_error YAZILIR. Bu yol deneme kaydı üretmiyor (attempt_count geri alındığı
+//     için attempt_no çakışırdı, bkz. releaseLeasesQuery), dolayısıyla "satır neden
+//     bekliyor" sorusunun TEK cevabı bu kolon. GET /notifications/{id} bunu gösteriyor.
+//   - available_at İLERİ TARİHLENEBİLİR. delay 0 iken dokunulmuyor: satır kuyruk
+//     sırasındaki yerini korur (devre kesici onu zaten bekletiyor). delay > 0 iken
+//     sağlayıcının rehberi (429'da Retry-After) ya da devrenin açık kalma süresi
+//     uygulanıyor.
+//
+// attempt_count'un azaldığı İKİNCİ yer burası (ilki releaseLeasesQuery).
+// CHECK (attempt_count >= 0) güvende: claim onu artırmıştı ve lease hâlâ bizde.
+// Durum pending değil retrying oluyor: processing -> pending geçişi yasak.
+const deferLeasesQuery = `
+	UPDATE notifications
+	SET status = 'retrying',
+	    attempt_count = attempt_count - 1,
+	    last_error = $3,
+	    available_at = CASE WHEN $4::interval > interval '0'
+	                        THEN now() + $4::interval
+	                        ELSE available_at END,
+	    lease_token = NULL, lease_expires_at = NULL
+	WHERE (id, lease_token) IN (SELECT * FROM unnest($1::uuid[], $2::uuid[]))
+	  AND status = 'processing'`
+
+// DeferLeases, verilen lease'leri denemeyi SAYMADAN bırakır ve etkilenen satır
+// sayısını döner.
+//
+// Çağıranlar (Adım 8): hız sınırı yanıtı (429) ve devre kesicinin devraldığı
+// gönderimler — ikisinde de "sağlayıcı mesajı kesin kabul etmedi" ve suç mesajın
+// değil. reason satıra last_error olarak yazılır; delay 0 ise available_at korunur.
+//
+// Lease'i artık bize ait olmayan satırlar (reaper devraldı) sessizce atlanır.
+func (s *Store) DeferLeases(
+	ctx context.Context, holds []LeaseHold, delay time.Duration, reason string,
+) (int64, error) {
+	if len(holds) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]uuid.UUID, len(holds))
+	tokens := make([]uuid.UUID, len(holds))
+
+	for i, hold := range holds {
+		ids[i] = hold.ID
+		tokens[i] = hold.Token
+	}
+
+	tag, err := s.pool.Exec(ctx, deferLeasesQuery, ids, tokens, reason, delay)
+	if err != nil {
+		return 0, fmt.Errorf("lease'ler ertelenemedi: %w", err)
+	}
+
+	return tag.RowsAffected(), nil
+}

@@ -534,3 +534,161 @@ func TestClaimLeavesLowPriorityBehindWhileHighPriorityArrives(t *testing.T) {
 	require.Len(t, claimed, 1)
 	require.Equal(t, lowPriority.ID, claimed[0].ID)
 }
+
+// readDeferState, erteleme sonrası satırın ilgili alanlarını okur.
+func readDeferState(t *testing.T, store *Store, id uuid.UUID) (
+	status string, attemptCount int, lastError *string, availableAt time.Time,
+) {
+	t.Helper()
+
+	require.NoError(t, store.pool.QueryRow(context.Background(),
+		`SELECT status, attempt_count, last_error, available_at FROM notifications WHERE id = $1`,
+		id).Scan(&status, &attemptCount, &lastError, &availableAt))
+
+	return status, attemptCount, lastError, availableAt
+}
+
+// TestDeferLeasesReturnsWorkWithoutCountingAttempt, ertelemenin denemeyi geri aldığını
+// doğrular.
+//
+// Bu, 429 ve devre kesici yollarının temel değişmezi: mesajın suçu olmadığı için
+// deneme hakkı harcanmamalı, yoksa sürekli 429 veren bir sağlayıcıda mesajlar
+// max_attempts'a varıp kalıcı failed olurdu.
+func TestDeferLeasesReturnsWorkWithoutCountingAttempt(t *testing.T) {
+	// Paralel DEĞİL: sharedPool her testin sonunda tabloları TRUNCATE ediyor.
+	store := New(sharedPool(t))
+	notification := claimOne(t, store)
+
+	require.Equal(t, 1, notification.AttemptCount, "claim sayacı artırmış olmalı")
+
+	deferred, err := store.DeferLeases(context.Background(),
+		[]LeaseHold{{ID: notification.ID, Token: *notification.LeaseToken}},
+		0, "sağlayıcı 429 döndü")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deferred)
+
+	status, attemptCount, _, _ := readDeferState(t, store, notification.ID)
+
+	require.Equal(t, string(domain.StatusRetrying), status,
+		"processing -> pending yasak, satır retrying'e döner")
+	require.Zero(t, attemptCount, "deneme sayılmamalı: sağlayıcı mesajı kabul etmedi")
+	require.Zero(t, countAttempts(t, store, notification.ID),
+		"deneme kaydı yazılmamalı: attempt_no çakışırdı")
+}
+
+// TestDeferLeasesPreservesAvailableAtWhenNoDelay, gecikme 0 iken satırın kuyruk
+// sırasını koruduğunu doğrular: devre kesici onu zaten bekletiyor.
+func TestDeferLeasesPreservesAvailableAtWhenNoDelay(t *testing.T) {
+	// Paralel DEĞİL: sharedPool her testin sonunda tabloları TRUNCATE ediyor.
+	store := New(sharedPool(t))
+	notification := claimOne(t, store)
+
+	_, _, _, before := readDeferState(t, store, notification.ID)
+
+	_, err := store.DeferLeases(context.Background(),
+		[]LeaseHold{{ID: notification.ID, Token: *notification.LeaseToken}}, 0, "devre açık")
+	require.NoError(t, err)
+
+	_, _, _, after := readDeferState(t, store, notification.ID)
+
+	require.True(t, before.Equal(after),
+		"gecikme 0 iken available_at değişmemeli: %s != %s", before, after)
+}
+
+// TestDeferLeasesDelaysAvailableAt, gecikme verildiğinde satırın ileri tarihlendiğini
+// doğrular (429'da Retry-After, devre açıkken açık kalma süresi).
+func TestDeferLeasesDelaysAvailableAt(t *testing.T) {
+	// Paralel DEĞİL: sharedPool her testin sonunda tabloları TRUNCATE ediyor.
+	store := New(sharedPool(t))
+	notification := claimOne(t, store)
+
+	const delay = 30 * time.Second
+
+	_, err := store.DeferLeases(context.Background(),
+		[]LeaseHold{{ID: notification.ID, Token: *notification.LeaseToken}},
+		delay, "sağlayıcı 429 döndü")
+	require.NoError(t, err)
+
+	_, _, _, availableAt := readDeferState(t, store, notification.ID)
+
+	// Tam değer yerine aralık: now() veritabanının saati ve test ile arasında
+	// milisaniyeler geçiyor (projedeki anti-flake kuralı).
+	require.WithinDuration(t, time.Now().Add(delay), availableAt, 10*time.Second)
+	require.True(t, availableAt.After(time.Now().Add(delay/2)),
+		"satır erteleme süresinden önce çekilebilir olmamalı")
+}
+
+// TestDeferLeasesWritesReason, sebebin satıra yazıldığını doğrular.
+//
+// Bu yol deneme kaydı üretmediği için last_error, "satır neden bekliyor" sorusunun
+// tek cevabı: GET /notifications/{id} bunu gösteriyor.
+func TestDeferLeasesWritesReason(t *testing.T) {
+	// Paralel DEĞİL: sharedPool her testin sonunda tabloları TRUNCATE ediyor.
+	store := New(sharedPool(t))
+	notification := claimOne(t, store)
+
+	const reason = "devre kesici açık: sağlayıcıya gidilmedi"
+
+	_, err := store.DeferLeases(context.Background(),
+		[]LeaseHold{{ID: notification.ID, Token: *notification.LeaseToken}}, 0, reason)
+	require.NoError(t, err)
+
+	_, _, lastError, _ := readDeferState(t, store, notification.ID)
+
+	require.NotNil(t, lastError)
+	require.Equal(t, reason, *lastError)
+}
+
+// TestDeferLeasesIgnoresForeignToken, başka bir worker'ın satırına dokunulmadığını
+// doğrular: lease koşulu olmasa reaper'ın devrettiği satır ezilirdi.
+func TestDeferLeasesIgnoresForeignToken(t *testing.T) {
+	// Paralel DEĞİL: sharedPool her testin sonunda tabloları TRUNCATE ediyor.
+	store := New(sharedPool(t))
+	notification := claimOne(t, store)
+
+	deferred, err := store.DeferLeases(context.Background(),
+		[]LeaseHold{{ID: notification.ID, Token: uuid.New()}}, 0, "yabancı token")
+	require.NoError(t, err)
+	require.Zero(t, deferred, "token eşleşmediğinde satır güncellenmemeli")
+
+	status, attemptCount, lastError, _ := readDeferState(t, store, notification.ID)
+
+	require.Equal(t, string(domain.StatusProcessing), status, "satır hâlâ sahibinde olmalı")
+	require.Equal(t, 1, attemptCount)
+	require.Nil(t, lastError)
+}
+
+// TestDeferredRowDoesNotCollideOnAttemptNo, ertelenen satırın yeniden çekilip
+// tamamlanabildiğini doğrular.
+//
+// Erteleme attempt_count'u geri aldığı için bir sonraki claim aynı attempt_no'yu
+// üretiyor. Deneme kaydı yazılmamış olduğundan UNIQUE (notification_id, attempt_no)
+// ihlal edilmiyor — bu değişmez bozulursa satır sonsuza kadar yazılamaz hâle gelir.
+func TestDeferredRowDoesNotCollideOnAttemptNo(t *testing.T) {
+	// Paralel DEĞİL: sharedPool her testin sonunda tabloları TRUNCATE ediyor.
+	ctx := context.Background()
+	store := New(sharedPool(t))
+	notification := claimOne(t, store)
+
+	_, err := store.DeferLeases(ctx,
+		[]LeaseHold{{ID: notification.ID, Token: *notification.LeaseToken}}, 0, "429")
+	require.NoError(t, err)
+
+	// Yeniden çekiliyor: attempt_count tekrar 1 oluyor.
+	reclaimed, err := store.ClaimNotifications(ctx, domain.ChannelSMS, 1, testLease)
+	require.NoError(t, err)
+	require.Len(t, reclaimed, 1)
+	require.Equal(t, notification.ID, reclaimed[0].ID)
+	require.Equal(t, 1, reclaimed[0].AttemptCount)
+
+	require.NoError(t, store.CompleteNotification(ctx, NotificationResult{
+		ID:         reclaimed[0].ID,
+		LeaseToken: *reclaimed[0].LeaseToken,
+		Status:     domain.StatusSent,
+		StatusCode: ptr(202),
+		DurationMS: 12,
+	}))
+
+	require.Equal(t, 1, countAttempts(t, store, notification.ID),
+		"tek deneme kaydı olmalı: erteleme kayıt yazmıyor, tamamlama yazıyor")
+}
