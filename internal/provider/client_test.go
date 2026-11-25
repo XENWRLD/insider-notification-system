@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -429,4 +430,41 @@ func TestErrorTypesUnwrapToCause(t *testing.T) {
 
 	require.ErrorIs(t, &TransportError{Err: cause}, cause)
 	require.ErrorIs(t, &DecodeError{Err: cause}, cause)
+}
+
+// TestSendKeepsErrorBodyWritableToDatabase, hata gövdesi kesitinin VERİTABANINA
+// yazılabilir kaldığını doğrular.
+//
+// Regresyon: kesit `trimmed[:512]` ile BAYT olarak kesiliyordu ve 512. bayt bir rune
+// sınırına denk gelmediğinde çok baytlı karakter ortadan bölünüp geçersiz UTF-8
+// üretiyordu. O metin StatusError.Error() üzerinden worker'a, oradan
+// notifications.last_error ve notification_attempts.error kolonlarına gidiyor; Postgres
+// geçersiz bayt dizisini reddettiği için sonuç yazımının TAMAMI düşüyor, satır lease
+// süresi boyunca processing'de kalıp reaper tarafından yeniden gönderiliyordu.
+func TestSendKeepsErrorBodyWritableToDatabase(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+
+		// "ş" 2 bayt: 512. bayt rune'un ortasına düşer. Araya NUL da konuyor —
+		// Postgres onu da text kolonunda kabul etmiyor.
+		_, _ = w.Write([]byte("x\x00"))
+		for range 400 {
+			_, _ = w.Write([]byte("ş"))
+		}
+	})
+
+	_, err := client.Send(context.Background(), testRequest())
+
+	var statusErr *StatusError
+	require.ErrorAs(t, err, &statusErr)
+
+	require.True(t, utf8.ValidString(statusErr.Body),
+		"kesit geçerli UTF-8 olmalı, yoksa last_error yazımı düşer")
+	require.NotContains(t, statusErr.Body, "\x00",
+		"NUL baytı ayıklanmalı: Postgres text kolonunda kabul etmiyor")
+	require.True(t, utf8.ValidString(statusErr.Error()),
+		"hata mesajının tamamı da geçerli olmalı: veritabanına giden metin bu")
+	require.LessOrEqual(t, len(statusErr.Body), errorBodyExcerpt+len("…"))
 }

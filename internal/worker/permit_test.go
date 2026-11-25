@@ -429,6 +429,42 @@ func TestPermitWaitBoundsEachLimiterCall(t *testing.T) {
 	require.Zero(t, sender.callCount(), "izin alınamadı, gönderim yapılmamalı")
 	require.Len(t, queue.releasedHolds(), 1, "satır kuyruğa geri verilmeli")
 
-	// Toplam süre bütçeyi aşmamalı (makine yavaşlığı için pay bırakıldı).
-	require.Less(t, elapsed, cfg.RateWaitMax+2*rateAllowTimeout)
+	// Toplam süre bütçeyi aşmamalı. Pay TEK bir çağrının zaman aşımından küçük:
+	// bütçe sona ererken başlayan sorgu artık kalan süreyle sınırlanıyor (bkz.
+	// TestAllowOnceCapsTimeoutByRemainingBudget), yani RateWaitMax gerçek bir üst sınır.
+	require.Less(t, elapsed, cfg.RateWaitMax+rateAllowTimeout)
+}
+
+// TestAllowOnceCapsTimeoutByRemainingBudget, tek izin sorgusunun kalan bekleme
+// bütçesini aşmadığını doğrular.
+//
+// Regresyon: allowOnce her zaman rateAllowTimeout (1 sn) kullanıyordu ve bütçe
+// kontrolü sorgudan SONRA yapılıyordu. Bütçenin bitmesine milisaniyeler kalmışken
+// başlayan bir sorgu bu yüzden RateWaitMax'ı ~1 sn aşabiliyordu; buna uykunun payı da
+// eklenince aşım ~1.25 sn'ye çıkıyordu. leaseWindow() süreyi RateWaitMax ile
+// hesapladığı için validate'in zorladığı lease alt sınırı eksik kalıyor ve ayarı tam o
+// değere çeken bir operatör lease'in gönderim ortasında dolmasına, yani reaper'ın
+// devralıp mesajı İKİNCİ KEZ göndermesine açık hâle geliyordu.
+func TestAllowOnceCapsTimeoutByRemainingBudget(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	queue := &stubQueue{}
+	sender := &stubSender{resp: acceptedResponse()}
+	limiter := &blockingLimiter{}
+
+	engine := newTestEngineWithLimiter(t, cfg, queue, sender, limiter)
+
+	// Bütçe tek çağrının zaman aşımından çok küçük: sorgu bütçe kadar sürmeli.
+	const budget = 50 * time.Millisecond
+
+	started := time.Now()
+
+	_, err := engine.allowOnce(context.Background(), domain.ChannelSMS, budget)
+
+	elapsed := time.Since(started)
+
+	require.Error(t, err, "takılı limiter bütçe dolunca hata döndürmeli")
+	require.Less(t, elapsed, rateAllowTimeout/2,
+		"sorgu kalan bütçeyle sınırlanmalı, rateAllowTimeout'u beklememeli")
 }

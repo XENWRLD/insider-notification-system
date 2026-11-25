@@ -68,8 +68,18 @@ func NewRouter(deps Dependencies) http.Handler {
 			"bu yol için HTTP method'u desteklenmiyor")
 	})
 
+	// HEAD de kaydediliyor. Gerekçe ölçümle bulundu: compose healthcheck'i
+	// `wget --spider` ile çağırıyor, Dockerfile runtime aşamasında `apk add wget`
+	// yaptığı için container'da GNU wget var ve `--spider` HEAD atıyor. chi,
+	// net/http'nin ServeMux'ının aksine GET rotası için HEAD'i OTOMATİK kaydetmez:
+	// istek MethodNotAllowed'a düşüp 405 alıyor, wget 8 ile çıkıyor ve `api` servisi
+	// kalıcı olarak `Up (unhealthy)` kalıyordu (restart politikası sağlık hatasında
+	// yeniden başlatmıyor). mockprovider bu tuzağa düşmüyor çünkü net/http ServeMux
+	// kullanıyor ve o, GET pattern'ini HEAD'e de eşliyor.
 	router.Get("/health/live", health.live)
+	router.Head("/health/live", health.live)
 	router.Get("/health/ready", health.ready)
+	router.Head("/health/ready", health.ready)
 
 	// Sürümlü API tabanı. /metrics (Adım 9) ve /ws (bonus) buraya eklenecek.
 	//

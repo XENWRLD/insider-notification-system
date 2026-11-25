@@ -113,3 +113,26 @@ func TestCorrelationIDIsGeneratedWhenMissing(t *testing.T) {
 
 	require.Len(t, recorder.Header().Get(CorrelationIDHeader), 36, "UUID biçiminde üretilmeli")
 }
+
+// TestHealthEndpointsAnswerHead, sağlık uçlarının HEAD'e de yanıt verdiğini doğrular.
+//
+// Regresyon: rotalar yalnızca router.Get ile kayıtlıydı. chi, net/http'nin
+// ServeMux'ının aksine GET rotası için HEAD'i otomatik kaydetmiyor; istek
+// MethodNotAllowed'a düşüp 405 alıyordu. Compose healthcheck'i `wget --spider`
+// kullanıyor ve Dockerfile runtime aşamasında GNU wget kuruyor — GNU wget --spider
+// HEAD atar, 405 alır ve 8 ile çıkar. Sonuç: api servisi kalıcı olarak
+// `Up (unhealthy)` kalıyordu (restart politikası sağlık hatasında devreye girmiyor).
+func TestHealthEndpointsAnswerHead(t *testing.T) {
+	t.Parallel()
+
+	router := newTestRouter(map[string]Pinger{"postgres": stubPinger{}})
+
+	for _, path := range []string{"/health/live", "/health/ready"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder,
+			httptest.NewRequestWithContext(t.Context(), http.MethodHead, path, nil))
+
+		require.Equal(t, http.StatusOK, recorder.Code,
+			"%s HEAD'e 200 dönmeli; 405 compose healthcheck'ini kalıcı olarak bozar", path)
+	}
+}

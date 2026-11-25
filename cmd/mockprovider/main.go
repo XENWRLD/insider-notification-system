@@ -40,6 +40,15 @@ const (
 	// maxConfigBody, /config gövdesinin üst sınırı. Ayar gövdesi birkaç yüz byte.
 	maxConfigBody = 4 << 10
 
+	// maxSendBody, /send gövdesinin üst sınırı. AYRI bir sabit olmak zorunda:
+	// maxConfigBody (4 KiB) burada kullanıldığında e-posta içeriği 10.000 karaktere
+	// kadar geçerli olduğu için (domain.EmailMaxContentRunes) ~4000 karakterden uzun
+	// her e-posta 400 alıyor ve gerçek sağlayıcı hatası sanılıyordu. API'nin tekil uç
+	// sınırıyla (BODY_LIMIT_SINGLE, 128 KiB) eşitlendi: API'nin kabul ettiği her gövde
+	// buradan da geçmeli, aksi hâlde mock gerçek sağlayıcıyı temsil etmiyor.
+	// (Üst sınır hesabı: 10.000 karakter × 4 bayt (UTF-8 en kötü) + zarf ≈ 40 KB.)
+	maxSendBody = 128 << 10
+
 	// shutdownTimeout, kapanışta süren isteklere tanınan süre. Mock'un en uzun işi
 	// ayarlanabilir gecikme kadar; 10 saniye rahat bir üst sınır.
 	shutdownTimeout = 10 * time.Second
@@ -202,7 +211,7 @@ type sendRequest struct {
 // send, bir gönderim isteğini karşılar.
 func (p *mockProvider) send(w http.ResponseWriter, r *http.Request) {
 	var req sendRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBody)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSendBody)).Decode(&req); err != nil {
 		p.record(http.StatusBadRequest, "")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "gövde çözülemedi"})
 

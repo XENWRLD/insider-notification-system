@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -216,11 +217,33 @@ func (c *Client) decodeSuccess(ctx context.Context, statusCode int, raw []byte) 
 }
 
 // excerpt, gövdenin hata mesajına konacak parçasını verir.
+//
+// Metin VERİTABANINA yazılabilir olmak zorunda: buradan çıkan parça StatusError /
+// DecodeError mesajına, oradan worker'ın classify'ına, oradan notifications.last_error
+// ve notification_attempts.error kolonlarına gidiyor. Postgres text kolonu geçersiz
+// UTF-8 dizisini ve NUL baytını REDDEDER — tek bozuk sağlayıcı gövdesi bütün sonuç
+// yazımını düşürür, satır da lease süresi boyunca processing'de kalıp reaper tarafından
+// yeniden gönderilirdi. Bu yüzden iki koruma var:
+//
+//  1. Geçersiz UTF-8 ve NUL ayıklanır (ToValidUTF8 + NUL temizliği).
+//  2. Kesme RUNE sınırında yapılır: bayt dilimi (raw[:512]) çok baytlı bir karakteri
+//     ortadan böler ve tam bu geçersiz diziyi üretir. Türkçe veya emoji içeren bir
+//     sağlayıcı hata sayfasında 512. bayt neredeyse hiç rune sınırına denk gelmez.
 func excerpt(raw []byte) string {
-	trimmed := strings.TrimSpace(string(raw))
-	if len(trimmed) <= errorBodyExcerpt {
-		return trimmed
+	cleaned := strings.ToValidUTF8(strings.TrimSpace(string(raw)), "")
+	cleaned = strings.ReplaceAll(cleaned, "\x00", "")
+
+	if len(cleaned) <= errorBodyExcerpt {
+		return cleaned
 	}
 
-	return trimmed[:errorBodyExcerpt] + "…"
+	// Kesim noktasındaki bayt bir rune'un BAŞI olana kadar geriye gidilir; böylece
+	// cleaned[:cut] her zaman tam rune'lardan oluşur. Rune en fazla 4 bayt olduğu için
+	// döngü en çok 3 adım atar.
+	cut := errorBodyExcerpt
+	for cut > 0 && !utf8.RuneStart(cleaned[cut]) {
+		cut--
+	}
+
+	return cleaned[:cut] + "…"
 }

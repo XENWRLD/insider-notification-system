@@ -84,6 +84,11 @@ func (e *Engine) handle(ctx context.Context, notification *domain.Notification) 
 //
 // İzin alınırsa true; alınamazsa false döner ve çağıran satırı kuyruğa geri verir.
 //
+// RateWaitMax GERÇEK bir üst sınır: bütçe hem döngü başında (sorgudan önce), hem tek
+// sorgunun zaman aşımında, hem de uykunun süresinde zorlanıyor. Bu, leaseWindow()
+// hesabının dayanağı — satırın lease altında geçirdiği süre RateWaitMax + sağlayıcı +
+// sonuç yazımını aşamaz.
+//
 // Context İPTAL EDİLEBİLİR — gönderimin ve sonuç yazımının aksine. İzin beklemenin
 // hiçbir yan etkisi yok, dolayısıyla SIGTERM beklemeyi kesmeli ve satır kuyruğa
 // dönmeli. Bu sayede DrainTimeout'un RateWaitMax'ı kapsaması gerekmiyor; yalnızca
@@ -106,7 +111,24 @@ func (e *Engine) awaitPermit(
 	)
 
 	for {
-		decision, err := e.allowOnce(ctx, notification.Channel)
+		// Bütçe kontrolü SORGUDAN ÖNCE. Önce sorgu atıp sonra kontrol etmek
+		// RateWaitMax'ı gerçek bir üst sınır olmaktan çıkarıyordu: bütçe dolmasına
+		// milisaniyeler kalmışken bir uyku (≤ rateWaitCeil) ve ardından takılı bir
+		// Redis'e karşı tam bir izin sorgusu (≤ rateAllowTimeout) daha sığıyordu, yani
+		// satır ~1.25 sn FAZLA lease altında kalabiliyordu. leaseWindow() bu süreyi
+		// RateWaitMax ile hesapladığı için validate'in bastığı "gereken lease" değeri
+		// de eksik kalıyordu — tam olarak o kontrolün engellemek için var olduğu
+		// senaryo (lease gönderim ortasında dolar, reaper devralır, mesaj iki kez gider).
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			log.WarnContext(ctx, "izin beklemesi aşıldı, iş kuyruğa geri veriliyor",
+				slog.String("rate_wait_max", e.cfg.RateWaitMax.String()),
+				slog.Int("waits", waits))
+
+			return false
+		}
+
+		decision, err := e.allowOnce(ctx, notification.Channel, remaining)
 
 		switch {
 		case err != nil:
@@ -141,15 +163,14 @@ func (e *Engine) awaitPermit(
 
 		waits++
 
-		if remaining := time.Until(deadline); remaining <= 0 {
-			log.WarnContext(ctx, "izin beklemesi aşıldı, iş kuyruğa geri veriliyor",
-				slog.String("rate_wait_max", e.cfg.RateWaitMax.String()),
-				slog.Int("waits", waits))
-
-			return false
+		// Uyku da bütçeyi aşmayacak biçimde kısaltılıyor; aşan bir uyku, döngü başındaki
+		// kontrol bütçeyi dolmuş bulana kadar satırı boşuna lease altında tutardı.
+		wait := jitter(window)
+		if left := time.Until(deadline); wait > left {
+			wait = left
 		}
 
-		if !sleep(ctx, jitter(window)) {
+		if !sleep(ctx, wait) {
 			// Kapanış: bekleme kesiliyor, satır kuyruğa dönecek.
 			return false
 		}
@@ -160,10 +181,19 @@ func (e *Engine) awaitPermit(
 //
 // Zaman aşımı olmadan takılı bir Redis tek çağrıda bütün bekleme bütçesini
 // tüketebilir (ölçüldü); böylece ne hata loglanır ne yeniden denenir.
+//
+// budget, çağıranın kalan bekleme bütçesi: zaman aşımı rateAllowTimeout ile bunun
+// KÜÇÜĞÜ olur. Böylece bütçenin sonunda başlayan bir sorgu RateWaitMax'ı aşamıyor ve
+// leaseWindow() hesabı gerçek en kötü süreyi kapsıyor.
 func (e *Engine) allowOnce(
-	ctx context.Context, channel domain.Channel,
+	ctx context.Context, channel domain.Channel, budget time.Duration,
 ) (ratelimit.Decision, error) {
-	allowCtx, cancel := context.WithTimeout(ctx, rateAllowTimeout)
+	timeout := rateAllowTimeout
+	if budget < timeout {
+		timeout = budget
+	}
+
+	allowCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	return e.limiter.Allow(allowCtx, channel)
@@ -234,9 +264,21 @@ func (e *Engine) releaseLeases(
 
 	released, err := e.queue.ReleaseLeases(releaseCtx, holds)
 	if err != nil {
-		// Kaybedilmedi: lease süresi dolunca reaper aynı işi kurtarır. Yalnızca
-		// yeniden çekilmesi gecikir.
-		log.ErrorContext(ctx, "lease'ler geri verilemedi, reaper kurtaracak",
+		// İş KAYBOLMUYOR ama bedeli "yalnızca gecikme" DEĞİL — bu yol bir deneme hakkı
+		// yakıyor:
+		//
+		// Claim attempt_count'u artırmıştı ve bu geri verme onu geri alacaktı. UPDATE
+		// düştüğü için satır artırılmış sayaçla processing'de kalıyor; lease dolunca
+		// reaper devralıyor ve reaper attempt_count'u BİLİNÇLİ OLARAK KORUYOR
+		// ("deneme gerçekten yapıldı" — store/reaper.go). Oysa bu satır sağlayıcıya hiç
+		// gitmedi. Yani tur başına: bir deneme hakkı + lease süresi kadar gecikme +
+		// o süre boyunca iptal edilemezlik, sıfır gönderim karşılığında. max_attempts
+		// kez tekrarlanırsa satır hiç denenmemiş hâlde kalıcı failed olur.
+		//
+		// Yapısal çözüm (sağlayıcıya gidilmemiş bir lease aşımının deneme sayılmaması)
+		// DeferLeases ile aynı sorunu paylaşıyor; ikisi tek yerde çözülmeli.
+		log.ErrorContext(ctx,
+			"lease'ler geri verilemedi: reaper devralacak ve bu deneme SAYILACAK",
 			slog.Int("pending", len(holds)),
 			slog.String("error", err.Error()))
 

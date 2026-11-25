@@ -331,3 +331,31 @@ func TestBehaviourJSONRoundTripsThroughConfig(t *testing.T) {
 	require.Equal(t, http.StatusOK, applied.Code,
 		"/stats çıktısı /config'e geri verilebilmeli")
 }
+
+// TestSendAcceptsBodyLargerThanConfigLimit, uzun bir e-posta gövdesinin kabul
+// edildiğini doğrular.
+//
+// Regresyon: /send gövdesi /config için boyutlandırılmış maxConfigBody (4 KiB) ile
+// sarılıyordu. E-posta içeriği 10.000 karaktere kadar geçerli olduğu için (API bunu
+// 202 ile kabul edip satırı yazıyor) ~4000 karakterden uzun her e-posta mock'tan 400
+// alıyor, worker bunu gerçek bir sağlayıcı reddi sanıp denemeleri tüketerek satırı
+// failed yapıyordu. Varsayılan compose yığınında PROVIDER_URL bu servis olduğu için
+// açık doğrudan uçtan uca akışı bozuyordu.
+func TestSendAcceptsBodyLargerThanConfigLimit(t *testing.T) {
+	t.Parallel()
+
+	provider := newTestProvider(t, config.MockProviderConfig{})
+
+	// maxConfigBody'nin (4 KiB) belirgin biçimde üstünde, API'nin e-posta sınırı içinde.
+	content := strings.Repeat("a", 10000)
+	body := `{"to":"a@example.com","channel":"email","content":"` + content + `"}`
+	require.Greater(t, len(body), maxConfigBody, "test gövdesi eski sınırı aşmalı")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/send", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	provider.send(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code,
+		"uzun e-posta gövdesi kabul edilmeli, 400 almamalı")
+}
