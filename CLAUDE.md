@@ -33,7 +33,9 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   **Scheduled bonusu** (`send_at`, migration'sız; F12 düzeltmesi ve `queue_depth`
   ayrımı dâhil)
   ve **polish** (review bulguları F06, F08, F09, F13, F14, F19, F42)
-- **Devam eden: 3. gün teslimi.** Kalan sıra: **README** → son prova. Kapsam dışı bırakılanlar: WebSocket, Template,
+  ve **README** (`README.md` İngilizce + `docs/DESIGN.md` uzun gerekçeler)
+- **Devam eden: 3. gün teslimi.** Kalan sıra: **son prova** (sıfırdan klon + demo
+  senaryosu). Kapsam dışı: WebSocket, Template, tracing, k6, Grafana. Kapsam dışı bırakılanlar: WebSocket, Template,
   tracing, k6, Grafana.
 - **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu). Düzeltilenler:
   A grubu (`fix: close review defects blocking step 8` — `excerpt` rune kesmesi,
@@ -229,6 +231,17 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
 - **Ölçüm:** 1000 SMS → 1 worker 12.1 sn (maks 98/sn), 3 worker 10.9 sn (her tam
   saniyede tam 96, maks 96) — sınır hiç aşılmıyor; sağlayıcı isteği toplam 1000 (çift
   gönderim yok). Kanal izolasyonu: 562 SMS kuyrukta beklerken 5 e-posta 1.09 sn'de gitti.
+
+### Dokümantasyon dili (README adımında sabitlendi)
+
+- **README ve `docs/DESIGN.md` İNGİLİZCE**, geri kalan her şey Türkçe (kod yorumları,
+  OpenAPI açıklamaları, API hata mesajları, commit gövdeleri, `docs/PLAN.md`).
+  Gerekçe: değerlendirme belgesi İngilizce, ekip uluslararası olabilir. README bu
+  ayrımı bir notla açıkça söylüyor — okuyucu Türkçe yorumlara rastladığında şaşırmasın.
+- **İki dosya, üç değil:** README değerlendiricinin okuyacağı tek şey olabileceği için
+  kendi başına yeterli; uzun gerekçeler DESIGN'a taşındı ve README oradan link veriyor.
+- **Ölçüm sayıları uydurulmaz:** README'deki `/metrics` örneği canlı yığından
+  alındı (400'lük batch akarken), gereksinim tablosu da PDF metninden çıkarıldı.
 
 ### Polish kararları (review bulguları)
 

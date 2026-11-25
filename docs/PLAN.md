@@ -410,8 +410,29 @@ duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
 - [ ] **Bonus — Template:** `text/template`, değişken yerleştirme → `feat: add template system`
 - [ ] **Bonus — WebSocket:** Redis pub/sub → `/ws` → `feat: add websocket status updates`
 - [ ] **Kanıt:** k6 yük testi, Prometheus + Grafana paneli → `chore: add load test and dashboards`
-- [ ] **Dokümantasyon:** OpenAPI + Swagger UI, README → `docs: add OpenAPI spec and README`
-      *(OpenAPI + Swagger UI bitti: `docs: add OpenAPI spec and Swagger UI`; README ayrı commit)*
+- [x] **Dokümantasyon:** OpenAPI + Swagger UI, README → `docs: add OpenAPI spec and README`
+      *(iki commit: `docs: add OpenAPI spec and Swagger UI` ve `docs: add README and design notes`)*
+  - [x] **README İngilizce** (`README.md`, ~460 satır) + uzun gerekçeler
+        `docs/DESIGN.md`'de (12 bölüm). Gerekçe: değerlendirme belgesi İngilizce ve ekip
+        uluslararası olabilir; kod yorumları, OpenAPI açıklamaları ve API hata
+        mesajları Türkçe kalıyor, README bunu bir notla söylüyor
+  - [x] **İlk ekran kaydırmasız:** ne olduğu (tek paragraf) + Quick start
+        (compose → curl → `/docs`, `/metrics`, `/health`) → 2 dakikada çalışır
+  - [x] **Mermaid mimari diyagramı** (GitHub'da render olur) + sistemi ayakta tutan
+        dört değişmez
+  - [x] **PDF gereksinim eşleme tablosu**: dört fonksiyonel başlık, teslim listesi ve
+        bonuslar madde madde "nerede karşılandı" ile. PDF metni
+        `docs/assessment/*.pdf`'ten çıkarılıp birebir kullanıldı
+  - [x] **Tasarım kararları** karar → neden → takas biçiminde 12 satırlık tablo;
+        uzun hâlleri DESIGN'da
+  - [x] **Ölçümler tablosu**: 1000 SMS 12.1 sn / 3 kopyada 10.9 sn (96/sn),
+        kabul B (200 yerine 8 istek, 0 failed), kabul C (2150 istekte 0 failed,
+        0 deneme), iki gecikme (1.65 sn ↔ 0.021 sn), index ölçümleri, zamanlanmış
+        gönderim 153 ms, kapanışta 0 ERROR. Örnek `/metrics` çıktısı **canlı
+        yığından** alındı (uydurulmadı)
+  - [x] **webhook.site bölümü**: kendi URL'ini alma, 202 + JSON yanıtı ayarlama,
+        `.env`'e yazma (`.env.example`'a DEĞİL) ve varsayılanın neden mock olduğu
+        (100 istek / 7 gün kotası)
   - [x] **OpenAPI 3.0.3 speci** `api/openapi/openapi.yaml`, elle yazıldı (koddan
         üretilmedi): 11 uç, kanal bazlı validation kuralları, idempotency/cursor/
         tarih aralığı sözleşmeleri ve her hata durumu örnekli. Redocly ile doğrulandı
@@ -433,16 +454,16 @@ duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
         `ErrorEnvelope.error.enum`, (4) `go/parser` ile `errors.go`'nun `ErrorCode`
         sabitleri ↔ `errorCodes` dizisi (dizinin kendisi de kopya olmaktan çıkıyor)
   - [x] OpenAPI'de `error` kodu enum'unu listele — tek kaynak: `internal/httpapi/errors.go`
-  - [ ] README'de RFC 9457 (`problem+json`) yerine düz hata zarfının neden seçildiğini
+  - [x] README'de RFC 9457 (`problem+json`) yerine düz hata zarfının neden seçildiğini
         bir cümleyle açıkla
-  - [ ] README'de SMS uzunluk kuralını (GSM-7 160 / Unicode 70) ve Türkçe karakterin
+  - [x] README'de SMS uzunluk kuralını (GSM-7 160 / Unicode 70) ve Türkçe karakterin
         maliyet etkisini belgele
-  - [ ] README'de idempotency hash tercihi: "Semantik olarak aynı ama byte olarak farklı
+  - [x] README'de idempotency hash tercihi: "Semantik olarak aynı ama byte olarak farklı
         istekler 409 alır; tekrar denemeler aynı baytları gönderdiği için bu bilinçli ve
         güvenli bir tercihtir."
-  - [ ] README'de batch sınırları: "1000 kayıt ve 16 MB sınırı birlikte uygulanır;
+  - [x] README'de batch sınırları: "1000 kayıt ve 16 MB sınırı birlikte uygulanır;
         Türkçe/emoji içerikli çok uzun e-posta batch'leri byte sınırına önce takılabilir."
-  - [ ] README'de starvation: yüksek öncelikli mesaj akışı sürdükçe düşük öncelikli
+  - [x] README'de starvation: yüksek öncelikli mesaj akışı sürdükçe düşük öncelikli
         mesaj hiç gönderilmeyebilir. Kuyruk sırası tek bir `ORDER BY priority_rank,
         available_at, id` ile belirleniyor ve bu, claim index'inin kolon sırasıyla
         birebir aynı. Aging (yaşlanan işin öncelik kazanması) bilinçli olarak
@@ -451,23 +472,23 @@ duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
         plan kararlarını değiştirir — yük altında ölçmeden yapılacak bir değişiklik
         değil. Davranış `TestClaimLeavesLowPriorityBehindWhileHighPriorityArrives` ile
         sabitlendi.
-  - [ ] README'de rate limit: izin gönderimden hemen önce alınıyor (1 izin = 1 gerçek
+  - [x] README'de rate limit: izin gönderimden hemen önce alınıyor (1 izin = 1 gerçek
         gönderim). Bedeli: izin bekleyen satır `processing` olduğu için o süre boyunca
         iptal edilemez (tipik 0.6 sn, en kötü `WORKER_RATE_WAIT_MAX`) ve öncelik sırası
         bir dalga boyunca donar. Claim öncesi izinde bu iki sorun olmazdı ama izinler
         boşa yanardı.
-  - [ ] README'de `WORKER_CONCURRENCY` sizing: limite göre aşırı büyük tutulmamalı.
+  - [x] README'de `WORKER_CONCURRENCY` sizing: limite göre aşırı büyük tutulmamalı.
         Throttle altında sender'lar izin beklerken lease tutuyor; `rate=1/sn` +
         `concurrency=20` olsaydı 20 satır 20 saniye rehin kalırdı. Sağlıklı ilişki
         `concurrency ≈ rate × (sağlayıcı gecikmesi + sonuç yazımı)` + pay.
         "izin beklemesi aşıldı" uyarıları çoğalıyorsa bu ayar yanlış.
-  - [ ] README'de kapanışta geri verilen iş: `ReleaseLeases` ile kuyruğa dönen hiç
+  - [x] README'de kapanışta geri verilen iş: `ReleaseLeases` ile kuyruğa dönen hiç
         denenmemiş satır `retrying` + `attempt_count = 0` görünür. `processing → pending`
         durum makinesinde yasak olduğu için satır `retrying`'e düşer, ama denemesi
         sayılmadığı için sayaç sıfıra geri alınır.
-  - [ ] README'de cursor sözleşmesi: imleç **opaktır**, yalnızca önceki yanıttan gelen
+  - [x] README'de cursor sözleşmesi: imleç **opaktır**, yalnızca önceki yanıttan gelen
         `next_cursor` geri verilmelidir; elle kurulmamalı (iç yapı değişebilir)
-  - [ ] README'de tarih aralığı: `[from, to)` yarı açık; `to` hariç olduğu için ardışık
+  - [x] README'de tarih aralığı: `[from, to)` yarı açık; `to` hariç olduğu için ardışık
         pencereler sınır kaydını iki kez saymaz. Saat dilimi zorunlu
 - [x] **Polish (review bulguları):** F06, F08, F09, F13, F14, F19, F42 → `fix: close review polish findings`
   - [x] **F08 — kendi recoverer'ımız:** chi'nin hazır `Recoverer`'ı istemciye GÖVDESİZ
@@ -499,6 +520,16 @@ duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
   - [x] **Ölçüm (canlı):** 300'lük batch uçuşurken `docker compose stop worker` →
         kapanış loglarında **0 ERROR**, yalnızca INFO; restart sonrası 303 `sent`,
         takılı `processing` satırı 0
+  - [x] **Bilinen sınırlar bölümü** (davranış + operasyonel): starvation, izin
+        beklerken iptal edilemezlik, at-least-once, zamanlanmış hedef anın retry
+        sonrası kaybı, kapanışta `retrying`+`attempt_count=0`, F41 (lease geri
+        verme hatasının deneme maliyeti), sürekli 429'un churn bedeli, replika
+        başına breaker, `WORKER_CONCURRENCY` sizing, **F10** (16 MiB gövde 15 sn
+        `ReadTimeout` ile ulaşılamaz — kodda DÜZELTİLMEDİ: `WriteTimeout` sayacı
+        header'da başladığı için yalnızca `ReadTimeout`'u büyütmek yetmiyor, ikisini
+        birden açmak yavaş istemci korumasını zayıflatıyor), gauge'ler,
+        kimliksiz `/metrics`, Swagger UI'ın CDN bağımlılığı, batch'in iki sınırı,
+        cursor opaklığı
 - [ ] **Son prova:** sıfırdan klon + demo senaryosu
 - [ ] **Mülakat provası**
 - [ ] *(Zaman kalırsa)* **Tracing:** OpenTelemetry + Jaeger
