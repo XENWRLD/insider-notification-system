@@ -1,0 +1,101 @@
+# CI: lint + testler.
+#
+# Go sürümü go.mod'dan okunuyor (go-version-file): sürüm tek yerde tanımlı kalsın,
+# workflow ile go.mod ayrışmasın.
+#
+# -race YALNIZCA burada koşuyor. Geliştirme Windows'ta yapılıyor ve orada yarış
+# dedektörü gcc istiyor (CGO); Linux runner'da gcc hazır olduğu için eşzamanlılık
+# hataları CI'da yakalanıyor. Bu proje için kritik: worker'ın doğruluğu goroutine
+# koordinasyonuna dayanıyor (jeton semaforu, tamponsuz dağıtım, kapanış sırası).
+#
+# testcontainers testleri de burada koşuyor: ubuntu runner'da Docker hazır, yani
+# `-short` ile atlanan Postgres/Redis entegrasyon testleri (claim yarışları, EXPLAIN
+# plan iddiaları, GCRA kovası) CI'da gerçekten çalışıyor.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Aynı dalda üst üste gelen push'larda eskisini iptal et: runner dakikası boşa gitmesin.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        # Biçim farkı varsa dosya adlarını göster ve kır. golangci-lint bunu da
+        # kapsıyor ama ayrı adım olarak hata mesajı çok daha okunur.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt uygulanmamış dosyalar:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go mod tidy farkı
+        # go.mod/go.sum elle düzenlenmiş ya da bağımlılık eklenip tidy koşulmamışsa kır.
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "go mod tidy go.mod/go.sum'ı değiştirdi; commit'e dahil edin:"
+            git --no-pager diff go.mod go.sum
+            exit 1
+          fi
+
+      - name: golangci-lint kur
+        # Resmi action yerine sürüm sabitlenmiş kurulum: action major sürümü ile
+        # golangci-lint v2 yapılandırma şeması arasındaki eşlemeyi tahmin etmek
+        # gerekmiyor. Sürüm yerelde kullanılanla aynı.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.15.0
+          golangci-lint --version
+
+      - name: golangci-lint
+        run: golangci-lint run --timeout=5m
+
+  test:
+    name: test (race + testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        # -race: Windows'ta koşturulamayan yarış dedektörü burada devrede.
+        # Docker runner'da hazır olduğu için testcontainers testleri de koşuyor.
+        # -timeout: testcontainers container'ları açarken yavaşsa asılı kalmasın,
+        # job timeout'undan önce okunur bir hata ver.
+        run: go test -race -timeout 15m ./...
