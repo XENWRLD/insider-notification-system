@@ -113,6 +113,14 @@ type Config struct {
 	// retryPolicy.RequeueDelay).
 	BreakerOpenTimeout time.Duration
 
+	// WorkerID, bu kopyanın kimliği (üretimde hostname). Devre durumu metriği
+	// kopya başına yayınlandığı için etiket olarak kullanılıyor.
+	WorkerID string
+
+	// BreakerStateInterval, devre durumlarının Redis'e yeniden yazılma periyodu.
+	// TTL bunun katı olarak hesaplanıyor (bkz. breakerStateTTLFactor).
+	BreakerStateInterval time.Duration
+
 	// RateWaitMax, hız sınırından izin beklemenin üst sınırı.
 	//
 	// Bekleme satır lease altındayken geçiyor, bu yüzden lease hesabının üçüncü
@@ -169,6 +177,7 @@ func (c Config) validate() error {
 		{"ResultTimeout", c.ResultTimeout},
 		{"DrainTimeout", c.DrainTimeout},
 		{"ClaimTimeout", c.ClaimTimeout},
+		{"BreakerStateInterval", c.BreakerStateInterval},
 		{"RetryBaseDelay", c.RetryBaseDelay},
 		{"RetryMaxDelay", c.RetryMaxDelay},
 		{"BreakerOpenTimeout", c.BreakerOpenTimeout},
@@ -269,6 +278,9 @@ type Engine struct {
 	// YAZILMIYOR; bu yüzden eşzamanlı okuma güvenli ve mutex gerekmiyor.
 	breakers map[domain.Channel]breaker.Breaker
 
+	// statePublisher nil olabilir: devre durumu metriği isteğe bağlı.
+	statePublisher StatePublisher
+
 	logger *slog.Logger
 }
 
@@ -286,6 +298,7 @@ func New(
 	sender Sender,
 	limiter ratelimit.Limiter,
 	newBreaker func(domain.Channel) (breaker.Breaker, error),
+	statePublisher StatePublisher,
 	logger *slog.Logger,
 ) (*Engine, error) {
 	if len(cfg.Channels) == 0 {
@@ -329,7 +342,7 @@ func New(
 
 	return &Engine{
 		cfg: cfg, queue: queue, sender: sender, limiter: limiter,
-		breakers: breakers, logger: logger,
+		breakers: breakers, statePublisher: statePublisher, logger: logger,
 	}, nil
 }
 
@@ -388,6 +401,12 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	group.Go(func() error {
 		e.runJanitor(groupCtx)
+
+		return nil
+	})
+
+	group.Go(func() error {
+		e.runBreakerStatePublisher(groupCtx)
 
 		return nil
 	})

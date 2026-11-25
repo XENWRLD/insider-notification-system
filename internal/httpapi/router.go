@@ -8,6 +8,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Dependencies, router'ın ihtiyaç duyduğu dış bağımlılıkları taşır.
@@ -26,6 +29,11 @@ type Dependencies struct {
 
 	// IdempotencyTTL, saklanan idempotency cevaplarının geçerlilik süresi.
 	IdempotencyTTL time.Duration
+
+	// MetricsCollector, /metrics ucunun kaynağı. nil ise uç hiç kaydedilmiyor:
+	// metrik toplayıcısı olmayan bir kurulumda 404 dönmek, boş bir /metrics
+	// yayınlamaktan dürüst.
+	MetricsCollector prometheus.Collector
 }
 
 // NewRouter, middleware zinciri kurulmuş HTTP handler'ını döner.
@@ -81,7 +89,34 @@ func NewRouter(deps Dependencies) http.Handler {
 	router.Get("/health/ready", health.ready)
 	router.Head("/health/ready", health.ready)
 
-	// Sürümlü API tabanı. /metrics (Adım 9) ve /ws (bonus) buraya eklenecek.
+	// /metrics kendi registry'siyle kuruluyor, default registry ile DEĞİL: global
+	// registry'ye başka bir paketin sessizce metrik eklemesi mümkün olurdu ve ne
+	// yayınladığımız açık kalmalı. Go runtime koleksiyoncusu (GC, goroutine sayısı,
+	// bellek) ayrıca ekleniyor — bir olay anında "sızıntı mı yavaşlık mı" sorusunu
+	// cevaplayan şey o.
+	if deps.MetricsCollector != nil {
+		registry := prometheus.NewRegistry()
+		registry.MustRegister(collectors.NewGoCollector())
+		registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		registry.MustRegister(deps.MetricsCollector)
+
+		metricsHandler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{
+			// Toplama hatası yanıtı düşürmesin: Collector hata döndürmüyor ama
+			// kayıt düzeyinde bir sorun olursa elimizdekini yayınlamak kör kalmaktan
+			// iyi.
+			ErrorHandling: promhttp.ContinueOnError,
+
+			// Eşzamanlı scrape sınırı: /metrics kimliksiz ve her scrape toplama
+			// turunu tetikleyebiliyor. Collector'ın kendi önbelleği + singleflight'ı
+			// asıl korumayı sağlıyor, bu ikinci savunma hattı.
+			MaxRequestsInFlight: 4,
+		})
+
+		router.Method(http.MethodGet, "/metrics", metricsHandler)
+		router.Method(http.MethodHead, "/metrics", metricsHandler)
+	}
+
+	// Sürümlü API tabanı. /ws (bonus) buraya eklenecek.
 	//
 	// Rota sırası: chi en belirgin kalıbı seçer, bu yüzden "/notifications" ile
 	// "/notifications/batch" çakışmaz.

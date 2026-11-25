@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/XENWRLD/insider-notification-system/internal/bootstrap"
+	"github.com/XENWRLD/insider-notification-system/internal/breakerstate"
 	"github.com/XENWRLD/insider-notification-system/internal/config"
 	"github.com/XENWRLD/insider-notification-system/internal/httpapi"
 	"github.com/XENWRLD/insider-notification-system/internal/observability"
@@ -81,6 +82,21 @@ func run() error {
 
 	notificationStore := store.New(pool)
 
+	// Devre durumu okuyucusu: worker'ların Redis'e yazdığı KOPYA BAŞINA durumları
+	// /metrics'e taşıyor. Devre kesici worker process'inin içinde ve worker HTTP
+	// dinlemiyor; durum hiçbir tabloya da yazılmıyor, yani Redis tek köprü.
+	// Kurulamazsa /metrics yine çalışıyor, yalnızca bu metrik eksik kalıyor.
+	var breakerStates observability.BreakerStateReader
+
+	if reader, stateErr := breakerstate.New(
+		redisClient, breakerstate.DefaultKeyPrefix,
+	); stateErr != nil {
+		logger.Warn("devre durumu okuyucusu kurulamadı, metrik eksik kalacak",
+			slog.String("error", stateErr.Error()))
+	} else {
+		breakerStates = reader
+	}
+
 	handler := httpapi.NewRouter(httpapi.Dependencies{
 		Logger: logger,
 		Health: map[string]httpapi.Pinger{
@@ -91,6 +107,8 @@ func run() error {
 		BodyLimitSingle: cfg.BodyLimitSingle,
 		BodyLimitBatch:  cfg.BodyLimitBatch,
 		IdempotencyTTL:  cfg.IdempotencyTTL,
+
+		MetricsCollector: observability.NewCollector(notificationStore, breakerStates, logger),
 	})
 
 	server := &http.Server{

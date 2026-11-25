@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,4 +136,75 @@ func TestHealthEndpointsAnswerHead(t *testing.T) {
 		require.Equal(t, http.StatusOK, recorder.Code,
 			"%s HEAD'e 200 dönmeli; 405 compose healthcheck'ini kalıcı olarak bozar", path)
 	}
+}
+
+// stubCollector, /metrics ucunun rota testleri için sabit bir metrik yayınlar.
+type stubCollector struct {
+	desc *prometheus.Desc
+}
+
+func newStubCollector() *stubCollector {
+	return &stubCollector{
+		desc: prometheus.NewDesc("test_metric", "Rota testi için.", nil, nil),
+	}
+}
+
+func (s *stubCollector) Describe(ch chan<- *prometheus.Desc) { ch <- s.desc }
+
+func (s *stubCollector) Collect(ch chan<- prometheus.Metric) {
+	ch <- prometheus.MustNewConstMetric(s.desc, prometheus.GaugeValue, 42)
+}
+
+// TestMetricsEndpointServesPrometheusText, /metrics ucunun Prometheus metni
+// döndürdüğünü ve Go runtime metriklerini de içerdiğini doğrular.
+func TestMetricsEndpointServesPrometheusText(t *testing.T) {
+	t.Parallel()
+
+	router := NewRouter(Dependencies{
+		Logger:           discardLogger(),
+		Health:           map[string]Pinger{"postgres": stubPinger{}},
+		MetricsCollector: newStubCollector(),
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder,
+		httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "test_metric 42")
+	require.Contains(t, recorder.Body.String(), "go_goroutines",
+		"Go runtime koleksiyoncusu da kayıtlı olmalı: olay anında sızıntı/yavaşlık ayrımı")
+}
+
+// TestMetricsEndpointAnswersHead, scrape öncesi yoklamaların 405 almadığını doğrular
+// (sağlık uçlarıyla aynı chi tuzağı).
+func TestMetricsEndpointAnswersHead(t *testing.T) {
+	t.Parallel()
+
+	router := NewRouter(Dependencies{
+		Logger:           discardLogger(),
+		MetricsCollector: newStubCollector(),
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder,
+		httptest.NewRequestWithContext(t.Context(), http.MethodHead, "/metrics", nil))
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+}
+
+// TestMetricsEndpointAbsentWithoutCollector, toplayıcı verilmediğinde ucun hiç
+// kaydedilmediğini doğrular: boş bir /metrics yayınlamak yerine 404 dönmek dürüst.
+func TestMetricsEndpointAbsentWithoutCollector(t *testing.T) {
+	t.Parallel()
+
+	router := NewRouter(Dependencies{Logger: discardLogger()})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder,
+		httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "correlation_id",
+		"404 de hata zarfını kullanmalı")
 }

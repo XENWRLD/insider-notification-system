@@ -78,6 +78,10 @@ type Config struct {
 	// WorkerBreakerOpenTimeout, açık devrenin yarı açığa geçmesi için beklenen süre.
 	// Devre devraldığında satırlar bunun iki katı kadar ertelenir.
 	WorkerBreakerOpenTimeout time.Duration
+	// WorkerBreakerStateInterval, devre durumlarının /metrics için Redis'e yeniden
+	// yazılma periyodu. TTL bunun üç katı: iki kaçırılmış yazıma tolerans var ama
+	// ölen bir kopyanın durumu asılı kalmıyor.
+	WorkerBreakerStateInterval time.Duration
 	// WorkerReaperInterval/BatchSize, lease kurtarma döngüsü.
 	WorkerReaperInterval  time.Duration
 	WorkerReaperBatchSize int
@@ -174,6 +178,7 @@ func Load() (Config, error) {
 		{"WORKER_RETRY_BASE_DELAY", &cfg.WorkerRetryBaseDelay, 2 * time.Second},
 		{"WORKER_RETRY_MAX_DELAY", &cfg.WorkerRetryMaxDelay, 5 * time.Minute},
 		{"WORKER_BREAKER_OPEN_TIMEOUT", &cfg.WorkerBreakerOpenTimeout, 30 * time.Second},
+		{"WORKER_BREAKER_STATE_INTERVAL", &cfg.WorkerBreakerStateInterval, 5 * time.Second},
 		{"WORKER_REAPER_INTERVAL", &cfg.WorkerReaperInterval, 10 * time.Second},
 		{"WORKER_RATE_WAIT_MAX", &cfg.WorkerRateWaitMax, 10 * time.Second},
 		{"IDEMPOTENCY_CLEANUP_INTERVAL", &cfg.IdempotencyCleanupInterval, time.Hour},

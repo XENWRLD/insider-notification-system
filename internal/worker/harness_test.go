@@ -29,17 +29,19 @@ func discardLogger() *slog.Logger {
 // testConfig, geçerli ve hızlı bir yapılandırma döner.
 func testConfig() Config {
 	return Config{
-		Channels:        []domain.Channel{domain.ChannelSMS},
-		Concurrency:     4,
-		ClaimBatchSize:  20,
-		LeaseDuration:   time.Minute,
-		PollMinInterval: time.Millisecond,
-		PollMaxInterval: 5 * time.Millisecond,
-		ProviderTimeout: time.Second,
-		ResultTimeout:   time.Second,
-		DrainTimeout:    5 * time.Second,
-		ClaimTimeout:    time.Second,
-		RateWaitMax:     300 * time.Millisecond,
+		Channels:             []domain.Channel{domain.ChannelSMS},
+		Concurrency:          4,
+		ClaimBatchSize:       20,
+		LeaseDuration:        time.Minute,
+		PollMinInterval:      time.Millisecond,
+		PollMaxInterval:      5 * time.Millisecond,
+		ProviderTimeout:      time.Second,
+		ResultTimeout:        time.Second,
+		DrainTimeout:         5 * time.Second,
+		ClaimTimeout:         time.Second,
+		WorkerID:             "test-worker",
+		BreakerStateInterval: 10 * time.Millisecond,
+		RateWaitMax:          300 * time.Millisecond,
 
 		RetryBaseDelay:          5 * time.Millisecond,
 		RetryMaxDelay:           50 * time.Millisecond,
@@ -449,7 +451,7 @@ func newTestEngineWithBreaker(
 ) *Engine {
 	t.Helper()
 
-	engine, err := New(cfg, queue, sender, limiter, newBreaker, discardLogger())
+	engine, err := New(cfg, queue, sender, limiter, newBreaker, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("motor kurulamadı: %v", err)
 	}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/XENWRLD/insider-notification-system/internal/bootstrap"
 	"github.com/XENWRLD/insider-notification-system/internal/breaker"
+	"github.com/XENWRLD/insider-notification-system/internal/breakerstate"
 	"github.com/XENWRLD/insider-notification-system/internal/config"
 	"github.com/XENWRLD/insider-notification-system/internal/domain"
 	"github.com/XENWRLD/insider-notification-system/internal/observability"
@@ -128,6 +129,31 @@ func run() error {
 		})
 	}
 
+	// Kopya kimliği: devre durumu metriği kopya başına yayınlandığı için etiket
+	// gerekiyor. Compose'da container adı, K8s'te pod adı burayı dolduruyor.
+	workerID, err := os.Hostname()
+	if err != nil {
+		// Kimlik alınamazsa metrik etiketi anlamsızlaşır ama gönderim etkilenmemeli.
+		logger.Warn("hostname okunamadı, devre durumu metriği 'unknown' etiketiyle yayınlanacak",
+			slog.String("error", err.Error()))
+
+		workerID = "unknown"
+	}
+
+	// Devre durumu yayıncısı: worker HTTP dinlemediği için durum Redis üzerinden
+	// API'nin /metrics ucuna taşınıyor. Kurulamazsa gönderim DURMUYOR — metrik
+	// isteğe bağlı, hız sınırının aksine fail closed davranışı burada yanlış olurdu.
+	var statePublisher worker.StatePublisher
+
+	if publisher, stateErr := breakerstate.New(
+		redisClient, breakerstate.DefaultKeyPrefix,
+	); stateErr != nil {
+		logger.Warn("devre durumu yayıncısı kurulamadı, metrik eksik kalacak",
+			slog.String("error", stateErr.Error()))
+	} else {
+		statePublisher = publisher
+	}
+
 	engine, err := worker.New(worker.Config{
 		Concurrency:     cfg.WorkerConcurrency,
 		ClaimBatchSize:  cfg.WorkerClaimBatchSize,
@@ -138,6 +164,7 @@ func run() error {
 		ResultTimeout:   cfg.WorkerResultTimeout,
 		DrainTimeout:    cfg.WorkerDrainTimeout,
 		ClaimTimeout:    cfg.WorkerClaimTimeout,
+		WorkerID:        workerID,
 		RateWaitMax:     cfg.WorkerRateWaitMax,
 		ReaperInterval:  cfg.WorkerReaperInterval,
 		ReaperBatchSize: cfg.WorkerReaperBatchSize,
@@ -146,11 +173,12 @@ func run() error {
 		RetryMaxDelay:           cfg.WorkerRetryMaxDelay,
 		BreakerFailureThreshold: cfg.WorkerBreakerFailureThreshold,
 		BreakerOpenTimeout:      cfg.WorkerBreakerOpenTimeout,
+		BreakerStateInterval:    cfg.WorkerBreakerStateInterval,
 
 		IdempotencyTTL:             cfg.IdempotencyTTL,
 		IdempotencyCleanupInterval: cfg.IdempotencyCleanupInterval,
 		IdempotencyCleanupBatch:    cfg.IdempotencyCleanupBatch,
-	}, store.New(pool), providerClient, limiter, newBreaker, logger)
+	}, store.New(pool), providerClient, limiter, newBreaker, statePublisher, logger)
 	if err != nil {
 		return err
 	}
