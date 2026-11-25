@@ -34,8 +34,12 @@ Mimari kararlar, yol haritası ve kabul kriterleri **`docs/PLAN.md`** içinde �
   ayrımı dâhil)
   ve **polish** (review bulguları F06, F08, F09, F13, F14, F19, F42)
   ve **README** (`README.md` İngilizce + `docs/DESIGN.md` uzun gerekçeler)
-- **Devam eden: 3. gün teslimi.** Kalan sıra: **son prova** (sıfırdan klon + demo
-  senaryosu). Kapsam dışı: WebSocket, Template, tracing, k6, Grafana. Kapsam dışı bırakılanlar: WebSocket, Template,
+  ve **son prova** (temiz klonda §10 demo senaryosunun on adımı; webhook.site'a
+  gerçek gönderim 202 + `messageId` ile doğrulandı)
+- **Teslime hazır.** Kapsam dışı: WebSocket, Template, tracing, k6, Grafana.
+  Paylaşmadan önce tek açık iş: webhook.site URL'inin git GEÇMİŞİNDE duran ESKİ
+  kopyası (`.env` temiz, `.env.example` yer tutucu) — repo public yapılacaksa önce
+  yeni URL'in rotasyonu. Kapsam dışı bırakılanlar: WebSocket, Template,
   tracing, k6, Grafana.
 - **Review:** Adım 8 öncesi beş açılı tam tarama yapıldı (52 bulgu). Düzeltilenler:
   A grubu (`fix: close review defects blocking step 8` — `excerpt` rune kesmesi,

@@ -309,6 +309,23 @@ To demo against webhook.site:
    ```json
    { "to": "+905551234567", "channel": "sms", "content": "Your message" }
    ```
+   Each request also carries `Idempotency-Key` (the notification ID, so a well-behaved
+   provider can deduplicate a retry) and `X-Correlation-ID`.
+
+Step 2 can be done from the terminal instead of the browser — webhook.site's own API
+accepts the token UUID from your URL:
+
+```bash
+TOKEN=<your-uuid>
+curl -s -X PUT "https://webhook.site/token/$TOKEN" -H 'Content-Type: application/json' -d '{
+  "default_status": 202,
+  "default_content_type": "application/json",
+  "default_content": "{\"messageId\":\"11111111-2222-3333-4444-555555555555\",\"status\":\"accepted\",\"timestamp\":\"2026-11-25T00:00:00Z\"}"
+}'
+curl -s "https://webhook.site/token/$TOKEN/requests?sorting=newest" | jq '.data[0].content'
+```
+
+The second call is how you verify delivery without opening the page.
 
 Any 2xx counts as acceptance, not just `202`: webhook.site's default response is `200`,
 and treating that as a failure would have retried messages the provider had accepted.

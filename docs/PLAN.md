@@ -530,7 +530,34 @@ duruyor; alt klasör paket adı (`openapi`) ile import yolunu hizalıyor.
         birden açmak yavaş istemci korumasını zayıflatıyor), gauge'ler,
         kimliksiz `/metrics`, Swagger UI'ın CDN bağımlılığı, batch'in iki sınırı,
         cursor opaklığı
-- [ ] **Son prova:** sıfırdan klon + demo senaryosu
+- [x] **Son prova:** sıfırdan klon + demo senaryosu (§10'un on adımı, temiz klonda)
+  - [x] Klon GitHub'dan alındı, `cp .env.example .env` + `docker compose up --build`:
+        beş servis sağlıklı, `migrate` `Exited (0)`, `/health/ready` iki bağımlılığı da
+        `ok`. Klonda `docs/review`, `docs/assessment`, `docs/learning` **yok** (gitignore
+        doğru çalışıyor); `make test-unit` ve `make help` klonda sorunsuz
+  - [x] Üç kanalda bildirim → 3'ü de `sent`, deneme kaydı dolu (202, ~51 ms)
+  - [x] 1000'lik batch + aynı `Idempotency-Key` ile tekrar → `Idempotent-Replay: true`,
+        aynı `batch_id` ve aynı 1000 kimlik, **DB'de 1000 satır** (2000 değil);
+        aynı key + farklı gövde → `409 conflict`
+  - [x] Öncelik (600 satır, karışık): high ortalama **1.01 sn**, normal **3.08 sn**,
+        low **5.15 sn**; bloklar yalnızca bir dalga kadar örtüşüyor. 60 satırla ölçüm
+        aldatıcıydı (hepsi 1 sn'de bitiyor) — büyük kuyrukla tekrarlandı
+  - [x] %30 hata oranı: 68 satır ilk denemede, 20'si 2, 7'si 3, 5'i 4 denemede gitti;
+        `failed` **0**, deneme geçmişinde 500 kodu ve hata metni görünüyor
+  - [x] İptal: `pending` → `cancelled`; tekrar iptal → `409`; `sent` kaydın iptali → `409`
+  - [x] Worker restart (800 satır uçuşurken, 150'si gitmişken): sonrası **800/800 sent**,
+        takılı `processing` **0**, sağlayıcıya giden toplam istek **800** (çift gönderim yok)
+  - [x] `--scale worker=3` + 1000 SMS: **12 sn**, maks **96/sn**, 100'ü aşan saniye **0**,
+        toplam sağlayıcı isteği **1000**. `/metrics` üç kopyanın devresini ayrı ayrı
+        gösteriyor (kopya başına anahtar)
+  - [x] `/health/live`, `/health/ready`, `/docs` (200, 907 B), `/openapi.yaml`
+        (200, 35.9 KB), `/metrics` (200) — hepsi temiz klonda
+  - [x] **webhook.site gerçek entegrasyon:** yeni URL `.env`'e alındı (eski, sızmış URL
+        dosyadan silindi). Üç kanal gönderildi, webhook.site'ta **3 istek** PDF'in
+        istediği gövdeyle göründü (`{to, channel, content}` + `Idempotency-Key` =
+        bildirim kimliği + `X-Correlation-ID`). Yanıt webhook.site'ın API'siyle
+        **202 + `{messageId, status, timestamp}`** olarak ayarlandı ve ikinci turda
+        `provider_message_id` doldu, kod **202**. Kotadan 6 istek kullanıldı (100 üzerinden)
 - [ ] **Mülakat provası**
 - [ ] *(Zaman kalırsa)* **Tracing:** OpenTelemetry + Jaeger
 
